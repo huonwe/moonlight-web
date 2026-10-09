@@ -2045,6 +2045,111 @@ page, horloge du client). Médianes en ms.
 - les tranches, pour décoder pendant que l'image arrive ;
 - un iDWT plus rapide, ou des images plus petites.
 
+### 6.29 Les tranches avec la relance, sur le câble à 120 i/s (09/10/2026, 22:27-22:47)
+
+Le banc du §6.28 (`build\` de 20:41, avec `7315bfcb`), avec quatre bras en
+ABCDDCBA (deux passes de 60 clics par bras), la relance allumée sur tous les
+bras PyroWave :
+
+- le HEVC du produit par SCTP, en témoin ;
+- PyroWave par la route audio, en images entières ;
+- PyroWave par la route audio, par tranches de 48 Kio (le défaut) ;
+- PyroWave par la route audio, par tranches de 16 Kio (`mw_ultra_slice_kb=16`).
+
+Les tranches n'existent que sur la route audio : `RtpVideo.js` ne donne les
+morceaux qu'au worker de la piste `vaudio`. Les trois bras PyroWave la
+prennent donc, et le bras en images entières sert de témoin. Les huit passes
+ont pris le LAN direct (paires IPv6 internes). Le lanceur et les rapports sont
+dans le scratchpad (`pw120c/` : `run-slices.sh`, `report.py`, `player.py`,
+`pwlegs.py`, `relaydrawn.py`), avec `gpuwait.py`.
+
+Au clic et hors sonde, comme au §6.26. Médiane / moyenne en ms, 120 clics par
+bras, ~11 500 images hors sonde.
+
+| Bras | Clic | Clic → capture | Capture → dessin (clic) | Hors sonde |
+|---|---|---|---|---|
+| HEVC, SCTP (le produit) | 10,1 / 10,3 | 6,6 / 6,6 | 3,6 / 3,7 | 3,4 / 3,5 |
+| PyroWave, route audio, images entières | 15,4 / 16,9 | 5,4 / 6,2 | 9,7 / 10,7 | 8,7 / 9,4 |
+| PyroWave, route audio, tranches de 48 Kio | 15,4 / 16,5 | 5,3 / 6,5 | 9,5 / 9,9 | 8,2 / 8,9 |
+| PyroWave, route audio, tranches de 16 Kio | 15,9 / 16,5 | 5,0 / 5,7 | 10,0 / 10,9 | 8,5 / 9,4 |
+
+La part de l'hôte, de la capture à la remise au relais, varie de 1,3 à 2,1 ms
+d'une passe à l'autre, dans un même bras. Elle ne dépend pas des tranches, qui
+ne se règlent que dans la page. Le tableau suivant la retire image par image
+(`relaydrawn.py` : le relais de l'hôte joint au journal des images par
+l'horodatage de capture). Il reprend aussi les passes du §6.28, dont le HEVC
+témoin donne les mêmes chiffres. Médianes (moyennes) en ms, les deux passes
+de chaque bras.
+
+| Bras | Hôte : capture → relais | Relais → arrivée | Relais → dessin |
+|---|---|---|---|
+| HEVC, SCTP (§6.28 et ici) | 1,7-2,2 | 0,86-0,90 | 1,5-1,6 (1,7) |
+| PyroWave, SCTP, sans relance (§6.28) | 1,4-2,2 | 3,8-3,9 | 9,2-9,5 (9,5-9,6) |
+| PyroWave, SCTP, avec relance (§6.28) | 1,8-2,1 | 3,9-4,0 | 8,1-8,3 (8,6-8,9) |
+| PyroWave, route audio, images entières | 1,35-1,7 | 3,0-3,1 | 7,0-7,4 (7,9-8,1) |
+| PyroWave, route audio, tranches de 48 Kio | 1,3-1,5 | 3,1-3,2 | 6,45-7,2 (7,3-7,8) |
+| PyroWave, route audio, tranches de 16 Kio | 1,9-2,1 | 3,1-3,2 | 6,5 (7,5) |
+
+La page, après le dernier octet (`gpuwait.py`, passes r1 ; les r2 de 16 Kio
+donnent les mêmes chiffres). Les deux horloges, du GPU et de la page, ne se
+recalent qu'entre deux bornes : le départ et la fin du GPU sont donnés par
+cet intervalle. Médianes en ms.
+
+| Étape | Images entières | Tranches de 48 Kio | Tranches de 16 Kio |
+|---|---|---|---|
+| morceaux par image | — | 3 | 10 |
+| soumission → fin | 3,9 | 2,7 | 2,9 |
+| dont soumission → départ du GPU | 0,55-1,0 | 1,4-1,8 | 1,55-2,0 |
+| dont travail du GPU (décodage + présentation) | 2,2 (1,77 + 0,31) | 0,58 (0,13 + 0,31) | 0,53 (0,08 + 0,31) |
+| dont fin du GPU → rappel | 0,27-0,74 | 0,24-0,73 | 0,24-0,67 |
+| boucle de relance, par image | 3,2-3,7 | 2,6-3,5 | 2,6-2,7 |
+
+- **Les tranches prennent** : 98,5 à 99,4 % des images, ~3 morceaux de 48 Kio
+  ou ~10 de 16 Kio par image. L'ordre d'envoi de l'hôte est donc bien celui
+  qu'attend la page. Aucune image incomplète ni en erreur ; 28 à 37 images par
+  passe ont été remplacées avant leur décodage, dans les trois bras PyroWave
+  (1 à 8 par SCTP au §6.28).
+- **Le GPU n'a plus que 0,55 ms de travail après le dernier octet**, au lieu
+  de 2,2 : l'iDWT se fait pendant que l'image arrive.
+- **Mais la dernière soumission démarre plus tard** : 1,4 à 2,0 ms avant que
+  le GPU s'y mette, au lieu de 0,55-1,0 en images entières. Deux causes
+  possibles : le GPU travaille encore aux morceaux d'avant, ou le processus
+  GPU de Chrome digère encore leurs soumissions. Dix morceaux attendent un peu
+  plus que trois alors que chacun porte moins de travail, ce qui penche pour
+  les soumissions. Seuls des horodatages GPU sur les morceaux eux-mêmes
+  trancheront.
+- **Au net, −0,8 à −1 ms de soumission à la fin, et −0,5 à −0,75 ms du relais
+  au dessin** (16 Kio : 7,25 → 6,5 en médiane, 8,0 → 7,5 en moyenne). Les
+  tranches de 48 Kio tombent entre les deux, avec une passe moins bonne (r2 :
+  soumission → fin 3,6 ms au lieu de 2,7). Hors sonde, −0,2 à −0,5 ms en
+  médiane ; au clic, rien de lisible derrière les ±1 ms de la phase.
+- **L'arrivée bouge à peine** : +0,1-0,2 ms du relais à l'arrivée avec les
+  tranches, le temps que le worker poste les morceaux au fil principal.
+- **La boucle de relance tourne moins** : 2,6-2,7 ms par image avec les
+  tranches de 16 Kio, ~32 % d'un cœur au lieu de ~40 %.
+- **La route audio vaut ~1 ms de mieux que SCTP pour PyroWave**, relance
+  allumée : du relais à l'arrivée, 3,9-4,0 → 3,0-3,1 ms ; du relais au dessin,
+  8,1-8,3 → 7,0-7,4 ms. Le §6.26 voyait 0,7 ms à l'arrivée.
+
+**Bilan depuis le §6.26.** Du relais au dessin, PyroWave est passé de 9,2-9,5
+ms (SCTP, sans relance, §6.28) à 6,5 ms : relance, route audio et tranches de
+16 Kio, soit −2,9 ms. Il reste ~4,9 ms derrière le HEVC du produit (1,55 ms) :
+
+- **l'arrivée, +2,2-2,3 ms** (3,1-3,2 contre 0,9) : 177 Ko par image, dont
+  ~1,4 ms de fil à 1 Gbit/s ;
+- **la page après le dernier octet, ~3,3 ms contre ~0,7** : 0,55 ms de GPU,
+  et autour de lui 1,4-2,0 ms avant le départ, 0,25-0,7 ms avant le rappel et
+  0,2 ms de dessin.
+
+**Verdict.** Les tranches sont un gain, plus régulier à 16 Kio, mais petit.
+Ce n'est plus le travail du GPU qui pèse dans la page : c'est le temps de
+Chrome autour de la soumission. Les leviers qui restent :
+
+- savoir où attend la dernière soumission (horodatages GPU sur les morceaux),
+  pour choisir entre moins de soumissions et un iDWT plus rapide ;
+- des images plus petites, pour l'arrivée ;
+- le bout de chaîne, puis B2.1, après la page.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
