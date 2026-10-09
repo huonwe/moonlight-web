@@ -19,6 +19,12 @@ ScreenCaptureKit's display time for the present, its callback for `deliver`,
 and the captured display's CVDisplayLink for DWM's timing. mw-click-target's
 `displayedUs` is then Metal's presentedTime.
 
+On a Linux host (plan « attente », AL0): the write to the uinput device for
+SendInput, mw-click-target's wl_pointer.button for the hook, wp_presentation's
+presented time for `composed`, the PipeWire buffer header's pts for the present
+(Mutter's screen cast; KMS: the vblank the scanout was read after) and the
+stream's process callback for `deliver`. No compositor timing: no vblank grid.
+
 Files of the pass, in bench-out/content-age: <tag>.server.log, <tag>.click-trace.csv,
 and when the client's are there (<tag>.json, <tag>.clicks.frames.csv) they name
 the frame that showed the flag; without them it is the first frame presented

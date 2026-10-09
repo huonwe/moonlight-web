@@ -30,8 +30,8 @@
 // when the OS says the picture reached the screen.
 //
 // One renderer per OS, each with the API a game there would use: D3D12 on
-// Windows (ClickTargetWin.cpp), Metal on macOS (ClickTargetMac.mm). Linux
-// (Vulkan) follows the same Options and the same log.
+// Windows (ClickTargetWin.cpp), Metal on macOS (ClickTargetMac.mm), Vulkan on
+// Wayland (ClickTargetLinux.cpp), on the same Options and the same log.
 namespace clicktarget {
 
 /// The flag, as fractions of the screen: LatencyFlag::kLeft..kBottom.
@@ -45,10 +45,12 @@ constexpr int kFlagMs = 100;
 struct Options
 {
     /// The screen, by its position in the OS's list (0 the first) or by its
-    /// device name (\\.\DISPLAY5); empty: the primary.
+    /// device name (\\.\DISPLAY5; macOS: its name; Wayland: the output's name
+    /// or a piece of its description); empty: the primary.
     std::string display;
     /// Covering the whole screen (the OS may then let it skip composition),
-    /// or a window over the top 90 % of it (always composed).
+    /// or a window over the top 90 % of it (always composed; Wayland: a
+    /// maximized window, which no client can place).
     bool fullscreen = true;
     /// macOS: full screen in a Space of its own, as a game's full-screen mode
     /// goes, rather than a borderless window over the desktop's Space.
@@ -86,8 +88,8 @@ struct Options
 
 /// A microsecond count on the OS's monotonic clock — on Windows the
 /// QueryPerformanceCounter that every MoonlightWeb stamp uses, on macOS the
-/// monotonic clock that ticks with mach time — so this log lines up with the
-/// host's click trace.
+/// monotonic clock that ticks with mach time, on Linux CLOCK_MONOTONIC — so
+/// this log lines up with the host's click trace.
 inline int64_t steadyNowUs()
 {
     return std::chrono::duration_cast<std::chrono::microseconds>(

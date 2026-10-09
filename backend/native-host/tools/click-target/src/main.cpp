@@ -26,8 +26,10 @@ namespace {
 const char* kUsage =
     "mw-click-target — on a click, the latency flag drawn and presented at once\n"
     "\n"
-    "  --display <n|name>   the screen: 0 the first, or \\\\.\\DISPLAY5 (default: primary)\n"
-    "  --window             a window over the top 90% of the screen (default: covering it)\n"
+    "  --display <n|name>   the screen: 0 the first, or \\\\.\\DISPLAY5 (default: primary);\n"
+    "                       Linux: an output's name (Meta-0) or a piece of its description\n"
+    "  --window             a window over the top 90% of the screen (default: covering it);\n"
+    "                       Linux: a maximized window\n"
     "  --space              macOS: full screen in a Space of its own\n"
     "  --sync 0|1           present at once (0, default) or on the refresh (1)\n"
     "  --no-tearing         with --sync 0, wait for the refresh rather than tear\n"
@@ -46,8 +48,8 @@ const char* kUsage =
     "  --out <file>         the log, one JSON object a line (default: stdout)\n"
     "\n"
     "Each click: {\"click\", \"downUs\", \"renderUs\", \"presentCallUs\", \"presentUs\",\n"
-    "\"presentId\", \"displayedUs\"} (macOS: and \"eventUs\"), on the steady clock\n"
-    "MoonlightWeb stamps with.\n";
+    "\"presentId\", \"displayedUs\"} (macOS and Linux: and \"eventUs\"; Linux: and the\n"
+    "presentation's \"flags\"), on the steady clock MoonlightWeb stamps with.\n";
 
 bool takeInt(const char* s, int& out, int lo, int hi)
 {

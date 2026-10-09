@@ -30,8 +30,23 @@ parks the pointer on.
   level (screensaver by default, normal with `--no-flag`). Started by
   `pass.py --host mw-mac` through launchd, on the screen named "Virtual
   Display".
-- Linux (Vulkan on Wayland) is the plan's next step, with the same options and
-  the same log.
+- **Linux**: Vulkan on Wayland (xdg-shell), a dynamic-rendering pass that
+  clears the background, then `vkCmdClearAttachments` for the bar and the
+  bands: no shader either. Present mode: immediate where tearing is offered,
+  else mailbox with `--sync 0`, fifo with `--sync 1`. The click is the
+  surface's `wl_pointer.button` (`downUs`; `eventUs` the compositor's stamp, in
+  whole milliseconds), the picture on the screen `wp_presentation`'s presented
+  time of the first frame shown at or after it, on the monotonic clock, with
+  its `flags` (8: zero-copy, the buffer scanned out as it is; a virtual monitor
+  of Mutter's has no scanout). Full screen is `set_fullscreen` on the output
+  named by `--display` (`Meta-0` for the stream's virtual monitor, or a piece
+  of an output's description); `--window` a maximized window, which no client
+  can place: on GNOME's primary monitor, which the virtual monitor is during a
+  stream, the panel then covers the flag's place and the probe cannot read it
+  (09/10/2026). The pointer is brought onto the window by a uinput absolute
+  pointer of the tool's own (the udev rule's uaccess gives the right); Wayland
+  says whether it is over the surface, not whose window is on top. Started by
+  `pass.py --host um790pro` as a unit of the user's systemd.
 - `--no-flag`, everywhere: a window that only takes the clicks, under the
   host's own flag, so that the bench's injected clicks land on it.
 
@@ -80,7 +95,9 @@ API does not say: run PresentMon beside it for that.
   every screen (the virtual display's name changes each time it is made). On
   macOS the same variable takes `*`, a display id or a screen's name; the Mac
   host's own flag is not in ScreenCaptureKit's picture anyway (09/10/2026,
-  `docs/design/click-waits.md` §8.2), so this tool is the Mac's marker.
+  `docs/design/click-waits.md` §8.2), so this tool is the Mac's marker. On
+  Linux, `*` also arms the flag in a Wayland session, which has none of its
+  own: the tool is the marker there too.
 - The host's pointer must be over the window: an injected click goes to the
   window under it, and the probe never moves it. The tool puts it there at
   start and brings it back every 250 ms if something took it away (a log

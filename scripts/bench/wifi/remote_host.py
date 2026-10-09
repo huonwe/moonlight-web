@@ -204,6 +204,36 @@ pgrep -f "user-data-dir=%(p)s" >/dev/null && echo "content up: %(u)s" || echo "c
         return self.sh("systemctl --user stop mw-content 2>/dev/null; pkill -f \"user-data-dir=%s\" "
                        "2>/dev/null; echo content stopped" % self.PROFILE).strip()
 
+    # Plan « attente », AL0-AL1. A unit of the user's systemd in the desktop
+    # session's environment, as content_start. Wayland has no flag of the host
+    # (LatencyFlagX11.cpp is X11 only): the tool is the marker. Its screen is
+    # the output Mutter made for the stream, "Meta-<n>" (any output whose name
+    # or description holds MW_BENCH_CLICK_TARGET_DISPLAY otherwise).
+    TARGET_UNIT = "mw-attente-click-target"
+    TARGET_LOG = "/tmp/mw-attente-click-target.jsonl"
+
+    def click_target_start(self, tag, secs, binary, args):
+        display = os.environ.get("MW_BENCH_CLICK_TARGET_DISPLAY", "Meta-")
+        argv = [binary, "--display", display, "--out", self.TARGET_LOG,
+                "--duration", str(int(secs))] + list(args)
+        script = r"""
+systemctl --user stop %(unit)s 2>/dev/null
+rm -f %(log)s
+ENVS=$(systemctl --user show-environment | grep -E '^(DISPLAY|XAUTHORITY|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS)=' | sed 's/^/--setenv=/' | tr '\n' ' ')
+systemd-run --user --collect --unit=%(unit)s $ENVS %(argv)s >/dev/null 2>&1
+sleep 3
+if systemctl --user is-active --quiet %(unit)s; then echo "click target up: %(argstr)s"; head -c 600 %(log)s; else echo "click target did not start:"; journalctl --user -u %(unit)s --no-pager -n 5 | tail -3; fi
+""" % {"unit": self.TARGET_UNIT, "log": self.TARGET_LOG,
+       "argv": " ".join(shlex.quote(x) for x in argv), "argstr": " ".join(args)}
+        return self.sh(script, timeout=60).strip()
+
+    def click_target_stop(self, dest):
+        self.sh("systemctl --user stop %s 2>/dev/null; sleep 1" % self.TARGET_UNIT)
+        text = self.sh("cat %s 2>/dev/null" % self.TARGET_LOG, timeout=60)
+        with open(dest, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        return "click target stopped, %d lines" % len(text.splitlines())
+
 
 class MacHost(RemoteHost):
     mid = "mw-mac"
