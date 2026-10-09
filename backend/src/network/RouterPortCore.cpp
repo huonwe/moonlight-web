@@ -29,6 +29,36 @@ RouterPortCore::RouterPortCore(IUpnpGateway& gateway, std::function<bool(uint16_
     , m_LeaseSec(mw::routerports::kLeaseSec)
 {}
 
+bool RouterPortCore::tunnelPortAllowed(bool devInstance, uint16_t port)
+{
+    using namespace mw::routerports;
+    if (devInstance) return port >= kDevTunnelPoolBegin && port <= kDevTunnelPoolEnd;
+    for (const uint16_t p : kTunnelPreferred)
+        if (p == port) return true;
+    return port >= kTunnelPoolBegin && port <= kTunnelPoolEnd;
+}
+
+RouterPortCore::Request RouterPortCore::tunnelRequest(bool devInstance,
+                                                      const QList<uint16_t>& remembered)
+{
+    using namespace mw::routerports;
+    Request request;
+    request.purpose = Purpose::Tunnel;
+    request.description = QStringLiteral("MoonlightWeb tunnel");
+    for (const uint16_t p : remembered)
+        if (tunnelPortAllowed(devInstance, p)) request.remembered.append(p);
+    if (devInstance) {
+        request.poolBegin = kDevTunnelPoolBegin;
+        request.poolEnd = kDevTunnelPoolEnd;
+        return request;
+    }
+    for (const uint16_t p : kTunnelPreferred)
+        request.preferred.append(p);
+    request.poolBegin = kTunnelPoolBegin;
+    request.poolEnd = kTunnelPoolEnd;
+    return request;
+}
+
 bool RouterPortCore::holds(uint16_t externalPort) const
 {
     for (const Claim& c : m_Held)

@@ -147,6 +147,15 @@ public:
     /// entry, because ICE would advertise it.
     RouterPortCore(IUpnpGateway& gateway, std::function<bool(uint16_t)> localBindProbe);
 
+    /// Whether a tunnel hole on `port` is one this kind of instance may hold:
+    /// the preferred list and the pool for the installed host, the --dev block
+    /// for a --dev (RouterPortPools.h).
+    static bool tunnelPortAllowed(bool devInstance, uint16_t port);
+
+    /// The tunnel's request. A remembered port the instance may not hold is
+    /// left out — a --dev remembering 3479 from before it had a block.
+    static Request tunnelRequest(bool devInstance, const QList<uint16_t>& remembered);
+
     /// The address this host had when its remembered ports were obtained.
     /// An entry the router still points there is ours to overwrite.
     void setPreviousLanAddress(const QString& ip) { m_PreviousLan = ip; }

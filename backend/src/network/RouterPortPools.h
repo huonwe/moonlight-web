@@ -67,6 +67,23 @@ constexpr uint16_t kTunnelPoolEnd = 46031;
 // ephemeral port, no worse off than every tunnel was before any of this.
 constexpr int kTunnelPortCap = 4;
 
+// A DEV identity's tunnel holes (the DEV build, or --dev: Edition.h) come from
+// a block of their own, and from nowhere else — neither the list above nor the
+// installed host's pool.
+//
+// A --dev runs beside the installed host on one machine, behind one LAN
+// address, and the router cannot tell the two apart: an entry pointed at that
+// address reads as ours to both, so the walk handed the --dev the very holes
+// the installed host held. A tunnel socket is only bound while a browser is
+// connected, so the --dev also found the port free, bound it, and kept it.
+// 09/10/2026: a --dev held UDP 3479 for an afternoon, and every browser the
+// installed 0.3.1 put on that hole looped on its lock screen, from 5G and the
+// office alike. The price: no corporate firewall passes these ports, so a --dev
+// is reached from the LAN, 5G or a home connection. Between the installed
+// host's pool and the media pool.
+constexpr uint16_t kDevTunnelPoolBegin = 46064;
+constexpr uint16_t kDevTunnelPoolEnd = 46095;
+
 // ── The stream ──────────────────────────────────────────────────────────────
 //
 // Each stream slot binds 48550 + slot locally, and that never changes: the

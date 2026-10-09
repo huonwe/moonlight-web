@@ -13,6 +13,8 @@
 #include <QMap>
 #include <QSet>
 
+#include <iterator>
+
 namespace {
 
 using Purpose = RouterPortCore::Purpose;
@@ -414,5 +416,56 @@ void run_router_port_core_tests()
         CHECK(kMediaBasePort + kMediaPortCount - 1 < 48984);
         CHECK(kTunnelPreferred[0] == 3478); // the corporate port first
         CHECK(kTunnelPortCap >= 1);
+        // The DEV block sits between the installed host's pool and the media pool.
+        CHECK(kTunnelPoolEnd < kDevTunnelPoolBegin);
+        CHECK(kDevTunnelPoolBegin <= kDevTunnelPoolEnd);
+        CHECK(kDevTunnelPoolEnd < kMediaPoolBegin);
+        CHECK(kDevTunnelPoolEnd - kDevTunnelPoolBegin + 1 >= kTunnelPortCap);
+    }
+
+    // ── A --dev beside the installed host never asks for the installed
+    //    host's tunnel ports (09/10/2026: a --dev held 3479, and the
+    //    installed host's browsers looped on their lock screen) ─────────────
+    {
+        using namespace mw::routerports;
+        for (const uint16_t p : kTunnelPreferred) {
+            CHECK(RouterPortCore::tunnelPortAllowed(false, p));
+            CHECK(!RouterPortCore::tunnelPortAllowed(true, p));
+        }
+        CHECK(!RouterPortCore::tunnelPortAllowed(true, kTunnelPoolBegin));
+        CHECK(!RouterPortCore::tunnelPortAllowed(true, kTunnelPoolEnd));
+        CHECK(RouterPortCore::tunnelPortAllowed(true, kDevTunnelPoolBegin));
+        CHECK(RouterPortCore::tunnelPortAllowed(true, kDevTunnelPoolEnd));
+        CHECK(!RouterPortCore::tunnelPortAllowed(false, kDevTunnelPoolBegin));
+        CHECK(!RouterPortCore::tunnelPortAllowed(false, 48550));
+
+        // The installed host's request is the one it always made.
+        const auto prod = RouterPortCore::tunnelRequest(false, {3479, kDevTunnelPoolBegin});
+        CHECK_EQ(prod.remembered, (QList<uint16_t>{3479}));
+        CHECK_EQ(prod.preferred.size(), qsizetype(std::size(kTunnelPreferred)));
+        CHECK_EQ(prod.poolBegin, kTunnelPoolBegin);
+        CHECK_EQ(prod.poolEnd, kTunnelPoolEnd);
+
+        // A --dev that remembers 3479 from before forgets it, and walks its block.
+        const auto dev = RouterPortCore::tunnelRequest(true, {3479, kDevTunnelPoolBegin + 1});
+        CHECK_EQ(dev.remembered, (QList<uint16_t>{uint16_t(kDevTunnelPoolBegin + 1)}));
+        CHECK(dev.preferred.isEmpty());
+        CHECK_EQ(dev.poolBegin, kDevTunnelPoolBegin);
+        CHECK_EQ(dev.poolEnd, kDevTunnelPoolEnd);
+
+        // Both on one machine, one LAN address, one router: the installed host
+        // took 3478 and 3479, released between browsers. The --dev lands in
+        // its own block whatever the table says, and the installed host's
+        // next claim is still at the front of the list.
+        FakeGateway gw;
+        RouterPortCore installed(gw, kAlwaysFree);
+        CHECK_EQ(installed.claim(RouterPortCore::tunnelRequest(false, {})).claim.external,
+                 uint16_t(3478));
+        RouterPortCore scratch(gw, kAlwaysFree);
+        const auto r = scratch.claim(RouterPortCore::tunnelRequest(true, {3479}));
+        CHECK(r.ok);
+        CHECK_EQ(r.claim.external, kDevTunnelPoolBegin);
+        CHECK_EQ(installed.claim(RouterPortCore::tunnelRequest(false, {})).claim.external,
+                 uint16_t(3479));
     }
 }

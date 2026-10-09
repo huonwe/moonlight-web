@@ -347,15 +347,17 @@ void RouterPortAllocator::deliver(quint64 token, const Claim& claim, const QStri
 
 void RouterPortAllocator::claimTunnelPort(QObject* context, Callback callback)
 {
-    RouterPortCore::Request request;
-    request.purpose = Purpose::Tunnel;
-    for (const quint16 p : m_Settings->rememberedTunnelPorts())
-        request.remembered.append(p);
-    for (const uint16_t p : mw::routerports::kTunnelPreferred)
-        request.preferred.append(p);
-    request.poolBegin = mw::routerports::kTunnelPoolBegin;
-    request.poolEnd = mw::routerports::kTunnelPoolEnd;
-    request.description = QStringLiteral("MoonlightWeb tunnel");
+    // A DEV identity walks its own block only (RouterPortPools.h), and forgets
+    // what it remembers from before it had one.
+    const bool dev = mw::edition::isDev();
+    QList<uint16_t> remembered;
+    for (const quint16 p : m_Settings->rememberedTunnelPorts()) {
+        if (RouterPortCore::tunnelPortAllowed(dev, p))
+            remembered.append(p);
+        else
+            m_Settings->forgetTunnelPort(p);
+    }
+    RouterPortCore::Request request = RouterPortCore::tunnelRequest(dev, remembered);
 
     const QString why = refusal();
     if (!why.isEmpty()) {
