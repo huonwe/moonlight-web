@@ -5615,7 +5615,9 @@ la fin de l'attente, pour 0,02 à 0,04 ms (banc §8o.6).
 dans le cache de l'utilisateur (`$XDG_CACHE_HOME/MoonlightWeb/vulkan-video-proofs.txt`).
 Il est rangé sous ce qui pourrait le changer : le GPU (UUID), le pilote et sa
 version, le noyau, le micrologiciel VCN (lisible par tous sous amdgpu), la
-taille, et la révision de l'encodeur du moteur. Seule une comparaison est
+taille, la révision de l'encodeur du moteur, et la version de l'app (depuis le
+09/10/2026, décision de Bruno : chaque mise à jour repose la preuve, un échec
+surtout, même quand la révision ne bouge pas). Seule une comparaison est
 gardée ; une preuve qui n'a pas pu tourner est reposée la fois suivante.
 
 **La règle de Bruno, appliquée au bout.**

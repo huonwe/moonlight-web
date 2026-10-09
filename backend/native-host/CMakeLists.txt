@@ -297,6 +297,11 @@ else()
                     src/encode/linux/VulkanAv1Encoder.cpp
                     src/encode/linux/Dav1dDecoder.cpp
                     ${_mw_spirv_headers})
+                # The proof's cached verdicts carry the app's version, so each
+                # update proves again. MW_VERSION comes from backend/; given to
+                # this one file, a new version recompiles only it.
+                set_property(SOURCE src/encode/linux/VulkanHevcProof.cpp APPEND PROPERTY
+                    COMPILE_DEFINITIONS MW_APP_VERSION="${MW_VERSION}")
                 target_include_directories(mw-native-host PRIVATE ${_mw_spirv})
                 target_include_directories(mw-native-host SYSTEM PRIVATE
                     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vulkan-headers/include)

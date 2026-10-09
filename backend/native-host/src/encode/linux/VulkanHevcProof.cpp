@@ -118,8 +118,15 @@ std::string firstLine(const std::string& path)
 /// padded past the picture, as for a viewer that crops.
 constexpr int kAv1EncoderRevision = 2;
 
-/// What could change a verdict, as one line. HEVC's keys stay what they
-/// were; AV1's start with "av1|" and carry its own revision and the decoder.
+#ifndef MW_APP_VERSION
+#define MW_APP_VERSION ""
+#endif
+
+/// What could change a verdict, as one line. AV1's keys start with "av1|" and
+/// carry its own revision and the decoder. Both end with the app's version:
+/// a revision is raised only for a change known to matter, and a verdict, a
+/// failure above all, must not outlive the build that reached it — every
+/// update asks again (Bruno, 09/10/2026).
 std::string cacheKey(const vulkan::DeviceIdentity& id, const std::string& renderNode, int width,
                      int height, const VulkanHevcEncoder::Witness& witness,
                      const std::string& av1Decoder = std::string())
@@ -145,6 +152,8 @@ std::string cacheKey(const vulkan::DeviceIdentity& id, const std::string& render
         key << "|r" << kEncoderRevision << "|d" << witness.transformDepth;
     else
         key << "|r" << kAv1EncoderRevision << "|q" << witness.constantQp << '|' << av1Decoder;
+    const std::string version = MW_APP_VERSION;
+    key << "|v" << (version.empty() ? "-" : version);
     std::string text = key.str();
     std::replace(text.begin(), text.end(), '\t', ' ');
     std::replace(text.begin(), text.end(), '\n', ' ');
