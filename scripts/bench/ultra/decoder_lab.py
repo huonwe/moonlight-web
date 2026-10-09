@@ -67,6 +67,12 @@ def main():
     ap.add_argument("--present", action="store_true", help="check the product's presentation path once")
     ap.add_argument("--power", default="high-performance", help="the adapter asked for: high-performance or low-power")
     ap.add_argument("--api", default="webgpu", help="webgpu, or webgl2 for the fallback decoder")
+    ap.add_argument("--idwt", type=int, default=2,
+                    help="the inverse wavelet's shader (WebGPU): 2, or 1 for the first, slower one")
+    ap.add_argument("--split", action="store_true",
+                    help="time each stage alone, in a pass of its own: dequant, each level of the inverse wavelet, pack")
+    ap.add_argument("--cmp", action="store_true", help="each frame's f32 planes against shader 1's")
+    ap.add_argument("--bw", action="store_true", help="the GPU's memory bandwidth, copying and writing 64 MiB")
     # Another machine's Chrome, reached through SSH tunnels: its DevTools port
     # forwarded here (-L), and this server forwarded there (-R) on the same
     # port, so both ends stay on the loopback.
@@ -112,8 +118,10 @@ def main():
             for mbps in a.mbps.split(","):
                 url = ("http://127.0.0.1:%d/scripts/bench/ultra/decoder-lab.html?clip=%s&mbps=%s&ref=%s"
                        "&frames=%d&timing=%d&stages=%s&warm=%d&power=%s&present=%d&api=%s&slices=%d"
+                       "&idwt=%d&split=%d&cmp=%d&bw=%d"
                        % (http_port, clip, mbps, a.ref, a.frames, a.timing, a.stages, a.warm, a.power,
-                          1 if a.present else 0, a.api, a.slices))
+                          1 if a.present else 0, a.api, a.slices, a.idwt, 1 if a.split else 0,
+                          1 if a.cmp else 0, 1 if a.bw else 0))
                 call("Page.navigate", url=url)
                 # A slow client (a TV) takes seconds to load the module that sets it.
                 for _ in range(120):
@@ -146,6 +154,18 @@ def main():
                           % (res["wallMs"]["p50"], res["wallMs"]["p99"]))
                 if res.get("presentMaxDiff") is not None:
                     print("    present path: max RGB diff %d against the oracle's frame" % res["presentMaxDiff"])
+                if res.get("planeDiff") is not None:
+                    print("    idwt %d against idwt 1: max f32 plane difference %.3g" % (res["idwt"], res["planeDiff"]))
+                if res.get("split"):
+                    sp = res["split"]
+                    print("    idwt %d, each stage alone, p50 (p99) ms: %s" % (res["idwt"], ", ".join(
+                        "%s %.3f (%.3f)" % (s, v["p50"], v["p99"]) for s, v in sp.items() if v)))
+                    levels = [v["p50"] for s, v in sp.items() if s.startswith("idwt") and v]
+                    if levels:
+                        print("    the levels summed: %.3f ms" % sum(levels))
+                if res.get("bandwidth"):
+                    print("    bandwidth: copy %(copyGBs).1f GB/s (read + write), write %(writeGBs).1f GB/s"
+                          % res["bandwidth"])
     finally:
         if chrome:
             chrome.terminate()

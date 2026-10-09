@@ -17,7 +17,10 @@
 //   with its coordinate offsets is the JPEG 2000 whole-sample symmetric
 //   extension of the interleaved signal; `mirror()` below does it directly.
 // - The inverse wavelet works on 32x32 tiles in workgroup memory, like
-//   upstream's, but in one dispatch per level for all components.
+//   upstream's, but in one dispatch per level for all components. Its
+//   default shader (IDWT2_WGSL) lifts in registers as upstream's does; the
+//   first port (IDWT_WGSL), which gives the same values twice as slowly on
+//   an AMD iGPU, stays for the bench's A/B.
 //
 // Output: the decoded planes in f32 (Y at the aligned size, Cb and Cr at half
 // of it, before the DC shift), then `pack` turns them into 8-bit 4:2:0 bytes
@@ -284,6 +287,124 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) lid: vec
 }
 `;
 
+// WGSL lines, one per k < n, indented for the shader body.
+const lines = (n, f) => Array.from({ length: n }, (_, k) => f(k)).join('\n    ');
+
+// The four lifting steps of the inverse CDF 9/7 on the samples v0 .. v(n-1)
+// of one run, unrolled so that they stay in registers: v4 .. v(n-5) come out
+// right (each step leaves one sample less at each end).
+function lift(v, n) {
+    const out = [];
+    for (const [first, c] of [
+        [2, 'DELTA'],
+        [3, 'GAMMA'],
+        [4, 'BETA'],
+        [5, 'ALPHA'],
+    ]) {
+        for (let i = first; i <= n - first; i += 2)
+            out.push(`${v}${i} -= ${c} * (${v}${i - 1} + ${v}${i + 1});`);
+    }
+    return out.join('\n    ');
+}
+
+// The same transform as IDWT_WGSL, value for value, laid out as upstream's
+// idwt.comp: 64 threads per 32x32 tile, each lifting a run of 8 outputs
+// (16 samples with their apron) of two rows at once in registers, then of
+// two columns. Workgroup memory only holds the tile between the steps, three
+// barriers instead of nine. Entries of S pair two rows (a pair of rows i:
+// rows 2i and 2i + 1), then, after the row pass, two columns.
+const IDWT2_WGSL = /* wgsl */ `
+struct Pass { w: u32, h: u32, comps: u32, y0: u32, bands: array<vec4u, 3>, outs: vec4u }
+@group(0) @binding(0) var<uniform> p: Pass;
+@group(0) @binding(1) var<storage, read_write> coef: array<f32>;
+
+const ALPHA: f32 = -1.586134342059924;
+const BETA: f32 = -0.052980118572961;
+const GAMMA: f32 = 0.882911075530934;
+const DELTA: f32 = 0.443506852043971;
+const K: f32 = 1.230174104914001;
+const INV_K: f32 = 1.0 / 1.230174104914001;
+const SPAN: u32 = 40u;  // 32 + 2 x 4 of apron
+const PITCH: u32 = 41u;  // a line of S, padded
+
+var<workgroup> S: array<vec2f, 820>;  // 20 x PITCH
+
+fn mirror(i: i32, n: i32) -> i32 {
+    var j = i;
+    if (j < 0) { j = -j; }
+    if (j > n - 1) { j = 2 * (n - 1) - j; }
+    return j;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u32) {
+    let w2 = 2u * p.w;
+    let h2 = 2u * p.h;
+    let bands = p.bands[wg.z];
+    let dst = p.outs[wg.z];
+    let ox = i32(wg.x * 32u) - 4;
+    let ty = wg.y + p.y0;
+    let oy = i32(ty * 32u) - 4;
+
+    // The interleaved signal and its apron, 20 pairs of rows of 40, mirrored
+    // and scaled as IDWT_WGSL does. The mirror keeps parity (the tile starts
+    // even), so a sample's band follows from its place in the tile.
+    for (var i = li; i < 20u * SPAN; i += 64u) {
+        let pair = i / SPAN;
+        let x = i - pair * SPAN;
+        let xOdd = (x & 1u) == 1u;
+        let col = u32(mirror(ox + i32(x), i32(w2)) >> 1);
+        let y = oy + i32(2u * pair);
+        let row0 = u32(mirror(y, i32(h2)) >> 1) * p.w;
+        let row1 = u32(mirror(y + 1, i32(h2)) >> 1) * p.w;
+        let sx = select(K, INV_K, xOdd);
+        let a = coef[select(bands.x, bands.y, xOdd) + row0 + col] * (sx * K);
+        let b = coef[select(bands.z, bands.w, xOdd) + row1 + col] * (sx * INV_K);
+        S[pair * PITCH + x] = vec2f(a, b);
+    }
+    workgroupBarrier();
+
+    // Rows: pairs 0-15 by runs of 8 (all threads), pairs 16-19 by runs of 4
+    // (half of them). A run starts 4 samples before its outputs.
+    let rp = li >> 2u;
+    let rx = 8u * (li & 3u);
+    let rb = rp * PITCH + rx;
+    ${lines(16, (k) => `var r${k} = S[rb + ${k}u];`)}
+    ${lift('r', 16)}
+    let apron = li < 32u;
+    let qp = 16u + (li >> 3u);
+    let qx = 4u * (li & 7u);
+    ${lines(12, (k) => `var q${k} = vec2f(0.0);`)}
+    if (apron) {
+        let qb = qp * PITCH + qx;
+        ${lines(12, (k) => `q${k} = S[qb + ${k}u];`)}
+        ${lift('q', 12)}
+    }
+    workgroupBarrier();
+    // Back transposed: entry c * PITCH + y pairs the tile's columns 2c and
+    // 2c + 1 of row y (the rows with their apron, 0-39).
+    ${lines(4, (j) => `S[(rx / 2u + ${j}u) * PITCH + 2u * rp] = vec2f(r${4 + 2 * j}.x, r${5 + 2 * j}.x);`)}
+    ${lines(4, (j) => `S[(rx / 2u + ${j}u) * PITCH + 2u * rp + 1u] = vec2f(r${4 + 2 * j}.y, r${5 + 2 * j}.y);`)}
+    if (apron) {
+        ${lines(2, (j) => `S[(qx / 2u + ${j}u) * PITCH + 2u * qp] = vec2f(q${4 + 2 * j}.x, q${5 + 2 * j}.x);`)}
+        ${lines(2, (j) => `S[(qx / 2u + ${j}u) * PITCH + 2u * qp + 1u] = vec2f(q${4 + 2 * j}.y, q${5 + 2 * j}.y);`)}
+    }
+    workgroupBarrier();
+
+    // Columns: 16 pairs by runs of 8, written straight from the registers.
+    let cp = li & 15u;
+    let cy = 8u * (li >> 4u);
+    let cb = cp * PITCH + cy;
+    ${lines(16, (k) => `var v${k} = S[cb + ${k}u];`)}
+    ${lift('v', 16)}
+    let gx = wg.x * 32u + 2u * cp;
+    let gy = ty * 32u + cy;
+    if (gx < w2) {
+        ${lines(8, (j) => `if (gy + ${j}u < h2) { let o = dst + (gy + ${j}u) * w2 + gx; coef[o] = v${4 + j}.x; coef[o + 1u] = v${4 + j}.y; }`)}
+    }
+}
+`;
+
 // f32 planes (before the DC shift) to 8-bit 4:2:0, cropped: one thread per
 // 4 bytes of a row, rows of Y, then Cb, then Cr (the width must be a
 // multiple of 8, so a chroma row is whole words).
@@ -362,10 +483,13 @@ export class PyroWaveDecoder extends PyroWaveFrame {
      * @param {GPUDevice} device
      * @param {number} width picture width (even)
      * @param {number} height picture height (even)
+     * @param {{idwt?: number}} [options] idwt: the inverse wavelet's shader,
+     *        2 (IDWT2_WGSL) or 1 (IDWT_WGSL, the same values, slower)
      */
-    constructor(device, width, height) {
+    constructor(device, width, height, { idwt = 2 } = {}) {
         super(width, height);
         this.device = device;
+        this.idwtVersion = idwt === 1 ? 1 : 2;
         this._resources();
     }
 
@@ -398,7 +522,10 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         });
         this.idwtPipe = d.createComputePipeline({
             layout: 'auto',
-            compute: { module: mod(IDWT_WGSL), entryPoint: 'main' },
+            compute: {
+                module: mod(this.idwtVersion === 2 ? IDWT2_WGSL : IDWT_WGSL),
+                entryPoint: 'main',
+            },
         });
         this.packPipe = d.createComputePipeline({
             layout: 'auto',
@@ -628,12 +755,51 @@ export class PyroWaveDecoder extends PyroWaveFrame {
             pass.setPipeline(this.idwtPipe);
             for (const p of this.passes) this._idwt(pass, p);
         }
-        if (run('pack')) {
-            pass.setPipeline(this.packPipe);
-            pass.setBindGroup(0, this.packBind);
-            // Rows: H of Y, then H/2 of Cb and H/2 of Cr.
-            pass.dispatchWorkgroups(Math.ceil(this.width / 4 / 64), this.height * 2);
-        }
+        if (run('pack')) this._pack(pass);
+        pass.end();
+        this.decodedThisSeq = true;
+    }
+
+    _pack(pass) {
+        pass.setPipeline(this.packPipe);
+        pass.setBindGroup(0, this.packBind);
+        // Rows: H of Y, then H/2 of Cb and H/2 of Cr.
+        pass.dispatchWorkgroups(Math.ceil(this.width / 4 / 64), this.height * 2);
+    }
+
+    /** The stages of decodeSplit(), in their order. */
+    splitStages() {
+        return ['dequant', ...this.passes.map((p, k) => `idwt${LEVELS - 1 - k}`), 'pack'];
+    }
+
+    /**
+     * The lab's decode(): the same work, each stage in a compute pass of its
+     * own (splitStages()), bracketed by `stamp(stage)` when that returns
+     * timestampWrites.
+     */
+    decodeSplit(encoder, stamp) {
+        const d = this.device;
+        d.queue.writeBuffer(this.payloadBuf, 0, this.payloadCpu, 0, alignUp(this.payloadWords, 1));
+        d.queue.writeBuffer(this.offsetsBuf, 0, this.offsetsCpu);
+        const begin = (stage) => {
+            const tw = stamp(stage);
+            return encoder.beginComputePass(tw ? { timestampWrites: tw } : undefined);
+        };
+        let pass = begin('dequant');
+        this._setRangeFirst(0);
+        pass.setPipeline(this.dequantPipe);
+        pass.setBindGroup(0, this.dequantBind);
+        pass.dispatchWorkgroups(this.blockCount);
+        pass.end();
+        this._setFineY0(0);
+        this.passes.forEach((p, k) => {
+            pass = begin(`idwt${LEVELS - 1 - k}`);
+            pass.setPipeline(this.idwtPipe);
+            this._idwt(pass, p);
+            pass.end();
+        });
+        pass = begin('pack');
+        this._pack(pass);
         pass.end();
         this.decodedThisSeq = true;
     }

@@ -62,6 +62,16 @@ const PART_STAMPS = 62;
 // A query set resolves at a multiple of 256 bytes.
 const RESOLVE_STRIDE = 256;
 
+// Bench switch (localStorage mw_ultra_idwt=1): the decoder's first inverse
+// wavelet shader, which gives the same values more slowly, for an A/B.
+function idwtVersion() {
+    try {
+        return globalThis.localStorage?.getItem('mw_ultra_idwt') === '1' ? 1 : 2;
+    } catch {
+        return 2;
+    }
+}
+
 function quantiles(xs) {
     if (!xs.length) return null;
     const s = Float64Array.from(xs).sort();
@@ -165,6 +175,7 @@ export class UltraPlayer {
     summary() {
         const out = {
             api: this.api || null,
+            idwt: this.decoder?.idwtVersion ?? null,
             stats: { ...this.stats },
             gpuTimestamps: !!this._querySet,
             early: this.early,
@@ -202,7 +213,9 @@ export class UltraPlayer {
             },
         });
         this.device.lost.then((info) => this.log('[MW-ULTRA] GPU device lost: ' + info.message));
-        this.decoder = new PyroWaveDecoder(this.device, this.width, this.height);
+        this.decoder = new PyroWaveDecoder(this.device, this.width, this.height, {
+            idwt: idwtVersion(),
+        });
         this.canvas = new OffscreenCanvas(this.width, this.height);
         this.context = this.canvas.getContext('webgpu');
         this.context.configure({ device: this.device, format: 'rgba8unorm', alphaMode: 'opaque' });
@@ -231,6 +244,8 @@ export class UltraPlayer {
                 this.width +
                 'x' +
                 this.height +
+                ', inverse wavelet ' +
+                this.decoder.idwtVersion +
                 (this._nudge ? ', nudged (' + this._nudge.mode + ')' : ''),
         );
         return true;

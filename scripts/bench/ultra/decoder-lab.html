@@ -14,6 +14,10 @@
       // with the oracle's own decode (max code difference, PSNR) and with the source
       // clip, then times the GPU decode of one frame `timing` times. The result is
       // left in window.__labResult. &api=webgl2 runs the WebGL2 fallback instead.
+      // WebGPU only: &idwt=1 the first inverse wavelet shader (2, the
+      // default, gives the same values faster), &cmp=1 the planes against
+      // the first shader's, &split=1 each stage timed alone, &bw=1 the GPU's
+      // memory bandwidth.
       import { PyroWaveDecoder } from "/frontend/js/stream/ultra/PyroWaveDecoder.js";
 
       const q = new URLSearchParams(location.search);
@@ -31,6 +35,16 @@
       // one submission each, as UltraPlayer does on the audio road; the timed
       // loop then times what the last piece leaves.
       const slices = Number(q.get("slices") || 0);
+      // The inverse wavelet's shader (PyroWaveDecoder's idwt option).
+      const idwt = Number(q.get("idwt") || 2);
+      // The timed loop with each stage in a pass of its own, each timed:
+      // dequant, every level of the inverse wavelet, pack.
+      const split = q.get("split") === "1";
+      // Each frame's f32 planes against shader 1's, the same frame decoded
+      // whole: the largest difference (the shaders do the same arithmetic).
+      const cmp = q.get("cmp") === "1";
+      // The GPU's memory bandwidth, copying then writing 64 MiB.
+      const bw = q.get("bw") === "1";
       const out = document.getElementById("log");
       const log = (s) => {
         out.textContent += s + "\n";
@@ -131,12 +145,26 @@
           frames.push(packets);
         }
 
-        const dec = new PyroWaveDecoder(device, w, h);
+        const dec = new PyroWaveDecoder(device, w, h, { idwt });
         const packedSize = (w * h * 3) / 2;
         const readback = device.createBuffer({
           size: dec.packedBuf.size,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
+        // The planes (Y, Cb, Cr in f32) of both decoders, read back.
+        const ref1 = cmp
+          ? new PyroWaveDecoder(device, w, h, { idwt: 1 })
+          : null;
+        const planeBytes = (dec.coefFloats - dec.outY) * 4;
+        const planeRead = ref1
+          ? [0, 1].map(() =>
+              device.createBuffer({
+                size: planeBytes,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+              }),
+            )
+          : null;
+        let planeDiff = 0;
 
         // A frame's blocks back to back in our host's send order (the
         // reference encoder's corpus comes in index order), cut in `n`
@@ -205,6 +233,25 @@
             0,
             dec.packedBuf.size,
           );
+          if (ref1) {
+            ref1.clear();
+            for (const p of frames[f]) ref1.pushPacket(p);
+            ref1.decode(enc, undefined, ["dequant", "idwt"]);
+            enc.copyBufferToBuffer(
+              dec.coefBuf,
+              dec.outY * 4,
+              planeRead[0],
+              0,
+              planeBytes,
+            );
+            enc.copyBufferToBuffer(
+              ref1.coefBuf,
+              ref1.outY * 4,
+              planeRead[1],
+              0,
+              planeBytes,
+            );
+          }
           device.queue.submit([enc.finish()]);
           await readback.mapAsync(GPUMapMode.READ);
           const got = new Uint8Array(readback.getMappedRange()).slice(
@@ -212,6 +259,18 @@
             packedSize,
           );
           readback.unmap();
+          if (ref1) {
+            await Promise.all(
+              planeRead.map((b) => b.mapAsync(GPUMapMode.READ)),
+            );
+            const a = new Float32Array(planeRead[0].getMappedRange());
+            const b = new Float32Array(planeRead[1].getMappedRange());
+            for (let i = 0; i < a.length; i++) {
+              const d = Math.abs(a[i] - b[i]);
+              if (d > planeDiff) planeDiff = d;
+            }
+            planeRead.forEach((x) => x.unmap());
+          }
           const vsOracle = compare(got, oracle[f], w * h);
           const vsSource = compare(got, source[f], w * h);
           perFrame.push({
@@ -273,10 +332,144 @@
           log(`present: max RGB diff ${maxDiff} (sampled 1 px in 49)`);
         }
 
+        // GPU time of each stage alone, the same frame again and again.
+        let splitMs = null;
+        if (hasTs && timing > 0 && split) {
+          const names = dec.splitStages();
+          const n = 2 * names.length;
+          const qs = device.createQuerySet({ type: "timestamp", count: n });
+          const resolve = device.createBuffer({
+            size: n * 8,
+            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+          });
+          const tsRead = device.createBuffer({
+            size: n * 8,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          });
+          const per = Object.fromEntries(
+            [...names, "span"].map((s) => [s, []]),
+          );
+          for (let i = 0; i < timing; i++) {
+            const enc = device.createCommandEncoder();
+            for (let k = 0; k < warm; k++) {
+              dec.decodedThisSeq = false;
+              dec.decode(enc);
+            }
+            dec.decodedThisSeq = false;
+            dec.decodeSplit(enc, (stage) => {
+              const k = names.indexOf(stage);
+              return {
+                querySet: qs,
+                beginningOfPassWriteIndex: 2 * k,
+                endOfPassWriteIndex: 2 * k + 1,
+              };
+            });
+            enc.resolveQuerySet(qs, 0, n, resolve, 0);
+            enc.copyBufferToBuffer(resolve, 0, tsRead, 0, n * 8);
+            device.queue.submit([enc.finish()]);
+            await tsRead.mapAsync(GPUMapMode.READ);
+            const t = new BigUint64Array(tsRead.getMappedRange());
+            const ms = (a, b) => Number(BigInt.asIntN(64, t[b] - t[a])) / 1e6;
+            const all = names.map((s, k) => ms(2 * k, 2 * k + 1));
+            const span = ms(0, n - 1);
+            // A pair out of order (the Arc's wrapped values) drops the run.
+            if (all.every((x) => x >= 0 && x < 1000) && span > 0) {
+              names.forEach((s, k) => per[s].push(all[k]));
+              per.span.push(span);
+            }
+            tsRead.unmap();
+          }
+          splitMs = Object.fromEntries(
+            Object.entries(per).map(([s, xs]) => [
+              s,
+              xs.length
+                ? { p50: pct(xs, 0.5), p99: pct(xs, 0.99), n: xs.length }
+                : null,
+            ]),
+          );
+        }
+
+        // Memory bandwidth: a compute pass copying 64 MiB to another
+        // buffer, then one writing 64 MiB.
+        let bandwidth = null;
+        if (hasTs && bw) {
+          const n = 1 << 22; // vec4f
+          const code = `
+            @group(0) @binding(0) var<storage, read> src: array<vec4f>;
+            @group(0) @binding(1) var<storage, read_write> dst: array<vec4f>;
+            @compute @workgroup_size(256)
+            fn copy(@builtin(global_invocation_id) id: vec3u) { dst[id.x] = src[id.x]; }
+            @compute @workgroup_size(256)
+            fn fill(@builtin(global_invocation_id) id: vec3u) { dst[id.x] = vec4f(f32(id.x)); }`;
+          const module = device.createShaderModule({ code });
+          const pipe = (entryPoint) =>
+            device.createComputePipeline({
+              layout: "auto",
+              compute: { module, entryPoint },
+            });
+          const S = GPUBufferUsage.STORAGE;
+          const a = device.createBuffer({ size: n * 16, usage: S });
+          const b = device.createBuffer({ size: n * 16, usage: S });
+          const qs = device.createQuerySet({ type: "timestamp", count: 2 });
+          const resolve = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+          });
+          const tsRead = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          });
+          const timeIt = async (p, src, dst, bytes) => {
+            const bind = device.createBindGroup({
+              layout: p.getBindGroupLayout(0),
+              entries: [
+                ...(p === fillPipe
+                  ? []
+                  : [{ binding: 0, resource: { buffer: src } }]),
+                { binding: 1, resource: { buffer: dst } },
+              ],
+            });
+            const gbs = [];
+            for (let i = 0; i < 20; i++) {
+              const enc = device.createCommandEncoder();
+              const pass = enc.beginComputePass({
+                timestampWrites: {
+                  querySet: qs,
+                  beginningOfPassWriteIndex: 0,
+                  endOfPassWriteIndex: 1,
+                },
+              });
+              pass.setPipeline(p);
+              pass.setBindGroup(0, bind);
+              pass.dispatchWorkgroups(n / 256);
+              pass.end();
+              enc.resolveQuerySet(qs, 0, 2, resolve, 0);
+              enc.copyBufferToBuffer(resolve, 0, tsRead, 0, 16);
+              device.queue.submit([enc.finish()]);
+              await tsRead.mapAsync(GPUMapMode.READ);
+              const t = new BigUint64Array(tsRead.getMappedRange());
+              const ms = Number(BigInt.asIntN(64, t[1] - t[0])) / 1e6;
+              if (ms > 0) gbs.push(bytes / ms / 1e6);
+              tsRead.unmap();
+            }
+            return gbs.length ? pct(gbs, 0.5) : null;
+          };
+          const fillPipe = pipe("fill");
+          const copyPipe = pipe("copy");
+          await timeIt(fillPipe, null, a, n * 16);
+          bandwidth = {
+            copyGBs: await timeIt(copyPipe, a, b, 2 * n * 16),
+            writeGBs: await timeIt(fillPipe, null, b, n * 16),
+          };
+          log(
+            `bandwidth: copy ${bandwidth.copyGBs?.toFixed(1)} GB/s (read + write), write ${bandwidth.writeGBs?.toFixed(1)} GB/s`,
+          );
+        }
+
         // GPU time of the decode, the same frame again and again.
         let gpuMs = [];
         let badTimestamps = 0;
-        if (hasTs && timing > 0) {
+        if (hasTs && timing > 0 && !split) {
           const qs = device.createQuerySet({ type: "timestamp", count: 2 });
           const resolve = device.createBuffer({
             size: 16,
@@ -325,6 +518,10 @@
           stages: stages || "all",
           warm,
           slices,
+          idwt,
+          split: splitMs,
+          planeDiff: ref1 ? planeDiff : null,
+          bandwidth,
           width: w,
           height: h,
           frames: perFrame.length,
