@@ -1742,6 +1742,97 @@ SwiftShader et sur le 780M. GPU restant au dernier morceau, 780M, 1080p :
   morceau plus petit (`mw_ultra_slice_kb`) est donc à essayer avec cette
   passe.
 
+### 6.25 U3.7 B1 : Chrome voit trop tard que le GPU a fini (09/10/2026, soir)
+
+> ⚠️ Les verdicts des §6.19-6.20 ne tiennent plus. Leur HEVC passait par la
+> piste vidéo RTP (métronome de Chrome, ~8 ms), et la sonde du clic se
+> mesurait elle-même jusqu'à `652fc726` (`click-waits.md` §6). La remesure à
+> 120 i/s contre le HEVC du produit (SCTP) attend l'UM790Pro sous Windows.
+
+Le point de départ est B0 (`click-waits.md` §3.4), sur le 780M, en plein flux :
+5,1 ms de la soumission à la fin pour 2,2 ms de travail GPU, et 3,6 ms pour une
+soumission vide. B1 reprend la question hors flux, avec
+`scripts/bench/ultra/gpuwait-lab.html` et `gpuwait_lab.py` :
+
+- les mêmes soumissions et la même trace que `UltraPlayer`, que
+  `gpuwait.py --dir bench-out/ultra-lab` lit telle quelle ;
+- un Chrome 155 headless à part, un GPU de DualRTX à la fois
+  (`--use-adapter-luid`) ;
+- la page isolée (COOP/COEP), donc une horloge à la µs et non à 0,1 ms ;
+- 1 500 soumissions par cas, deux tours ABBA. Médianes en ms.
+
+| Cas | RTX 5060 Ti | Arc A380 | iGPU AMD (2 CU) |
+|---|---|---|---|
+| commande vide, sans passe | 0,10 | 0,11 | 0,10 |
+| passe vide horodatée | 2,9-3,2 | 3,0-3,2 | 3,0-3,1 |
+| dont après la fin du GPU | 2,6-2,8 | 2,7-2,8 | 1,8-2,3 |
+| image 1080p décodée, 120 i/s | 3,7 | 4,2 | 8,0-8,3 |
+| dont travail du GPU | 0,19 | — * | 5,4 |
+| dont après la fin du GPU | 2,8 | — * | 1,3-1,5 |
+
+\* En décodage, l'Arc rend des horodatages faux.
+
+- **Ce n'est pas le 780M.** Les trois GPU, de trois marques, paient les mêmes
+  ~3 ms pour une passe vide, que le GPU exécute en quelques µs. La montée en
+  fréquence du GPU (hypothèse 2 de B1) n'en est donc pas la cause.
+- **C'est le processus GPU de Chrome, qui ne relève ses barrières que de
+  temps en temps (hypothèse 1).**
+  - Une commande vide, qui n'attend rien, revient en 0,1 ms : l'aller-retour
+    lui-même ne coûte rien.
+  - Le temps passe entre la fin du travail et le moment où Chrome s'en
+    aperçoit : 2 à 3 ms. Les fins ne tombent sur aucune grille fixe : le
+    délai court depuis la soumission.
+  - Lecture probable : un relevé différé d'~2 ms après la dernière commande
+    reçue, puis toutes les ~2 ms. Ce n'est pas vérifié dans les sources de
+    Chromium.
+- Rien d'autre ne change ce délai : attendre par `mapAsync` au lieu
+  d'`onSubmittedWorkDone`, décoder dans un worker plutôt que sur le fil
+  principal, soumettre à 120 i/s ou d'affilée.
+- Sur l'iGPU AMD, le décodage (5,4 ms) plus l'attente dépassent l'intervalle
+  de 8,33 ms : 109 à 117 images par seconde au lieu de 120.
+
+**Le levier : une commande vide pendant l'attente.** `queue.submit([])` toutes
+les 0,25 ms (ou toutes les 1 ms), par une boucle de messages, tant que l'image
+attend :
+
+| Décodage à 120 i/s | Soumission → fin | Après la fin du GPU | Début du GPU | Fil principal par image | Images/s |
+|---|---|---|---|---|---|
+| RTX, sans | 3,7 | 2,8 | 0,5-0,6 | 0,6-0,8 | 120 |
+| RTX, toutes les 0,25 ms | 1,0-1,2 | 0,34-0,37 | 0,5-0,6 | 1,9-2,3 | 120 |
+| RTX, toutes les 1 ms | 1,3 | 0,63 | 0,6-0,7 | 2,5 | 120 |
+| iGPU AMD, sans | 8,1-8,2 | 1,3-1,4 | 1,3 | 0,6-0,8 | 109-115 |
+| iGPU AMD, toutes les 0,25 ms | 6,6-6,7 | 0,36-0,43 | 0,75-0,8 | 7,2 | 120 |
+| iGPU AMD, toutes les 1 ms | 7,2 | 1,0 | 0,7-0,8 | 7,5 | 120 |
+
+- **N'importe quelle commande réveille Chrome.** Une soumission vide,
+  4 octets par `writeBuffer` ou un `onSubmittedWorkDone` de plus ramènent tous
+  le délai à ~0,35 ms. Sur l'iGPU AMD, le GPU commence aussi plus tôt (1,3 →
+  0,75 ms), et le décodage retrouve ses 120 images par seconde.
+- **Le prix : le fil principal tourne pendant toute l'attente.** La boucle de
+  messages coûte 1,1 à 1,6 ms par image sur la RTX, et ~6,5 sur l'iGPU AMD.
+  Des minuteries ne marchent pas à la place : dans ce Chrome, un
+  `setTimeout(1)` part 1,5 à 3 ms plus tard, et le délai ne bouge pas.
+- **Ce qu'on peut en attendre sur le 780M**, d'après les chiffres de B0 : la
+  fin vue 1,2 à 1,8 ms plus tôt, et le GPU qui commence ~0,5 ms plus tôt. Soit
+  1,5 à 2 ms par image, sur le clic comme sur l'hôte → dessin, à condition que
+  l'affichage ne repaie pas ce délai plus loin.
+- Le HEVC ne passe pas par ce chemin : WebCodecs remet ses images autrement.
+  C'est un handicap propre à PyroWave dans la page.
+
+**À vérifier avant d'en tirer un gain :**
+
+- **Le 780M dans le même labo**, et une fenêtre affichée (hypothèse 3 : la
+  file partagée avec le compositeur).
+- **Ce qui arrive à l'écran.** La sonde corrigée date le dessin, pas
+  l'affichage. Une image remise plus tôt à la page (`mw_ultra_early=1`, ou B2.1
+  par le canevas WebGPU) avance cette heure sans prouver que l'écran avance.
+  Un tel levier se juge donc en bout de chaîne, sur l'écran du client
+  (`scripts/bench/photon/`).
+- **La relance dans `UltraPlayer`**, derrière une clé de banc, en ne tournant
+  qu'autour de la fin attendue (les horodatages GPU la donnent) pour épargner
+  le fil principal. Puis des passes ABBA sur le câble, jugées au clic et à
+  l'hôte → dessin.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
