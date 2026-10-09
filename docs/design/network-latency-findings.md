@@ -1525,6 +1525,18 @@ No bench here; the fix and its numbers are in `652fc726` (not pushed).
     drawn while a click waited could have been slowed at 240 fps.
 - **The RTP video track** still pays Chrome's 64 Hz metronome (U1.4 ter) on
   top; the product's video is on SCTP.
+- **First passes with the fixed probe** (session « Capture et Attente »,
+  09/10 08:11, Ethernet, relayed by session 59):
+  - SCTP: click 11.5-11.8 ms median. The RTP track's 26-27 ms was taken with
+    the old probe, so the two are not comparable;
+  - the comparable figure is capture → screen: 3.2-3.6 ms on SCTP against
+    11.7-12 ms on the RTP track. **The metronome alone costs ~8 ms a frame**,
+    in line with U1.4 ter's 7.8 ms hold, and it backs W4's verdict against
+    the RTP track;
+  - "Auto" detected at 240 fps saves the host 3.9 ms between the click and
+    the capture;
+  - at 240 fps on the 780M the probe still reads for 3.4-3.9 ms: judge a gain
+    from the per-leg breakdown, not from the click alone.
 
 ## 4. The model so far (04/10/2026)
 
