@@ -42,12 +42,16 @@ namespace {
 
 /// This engine's encoder, as far as a verdict goes: raised whenever what
 /// VulkanHevcEncoder hands the driver changes (its parameter sets, its use of
-/// references), so that a pass proven for another revision proves nothing.
-/// 2: intra refresh (C13.9), which the proof now covers.
-constexpr int kEncoderRevision = 2;
+/// references), or how the proof reads it back, so that a verdict reached by
+/// another revision counts for nothing. 2: intra refresh (C13.9), which the
+/// proof now covers. 3: the proof's decoder lists every picture kept; until
+/// then it read a right stream wrong from 73 fps on, and the failure was kept
+/// for good (09/10/2026).
+constexpr int kEncoderRevision = 3;
 
-/// The sequence: an IDR, P pictures, frames 4 and 5 lost and healed from 3,
-/// a keyframe asked for at 10.
+/// The sequence: an IDR, P pictures, frames 4 and 5 lost and healed from an
+/// older picture kept — 3 up to 72 fps, the IDR from 73 on, where the slots'
+/// stride passes 3 by (ReferenceSlots) — a keyframe asked for at 10.
 constexpr int kPictures = 12;
 constexpr uint32_t kLostFrom = 4;
 constexpr uint32_t kLostTo = 5;
@@ -55,8 +59,9 @@ constexpr uint32_t kKeyframeAt = 10;
 
 /// Where the driver has intra refresh, sweeps of this many pictures back to
 /// back: pictures 4 to 7 would be the first, the repair at 6 starts it over
-/// from 3 (a wholly dirty reference), and the keyframe at 10 ends the next —
-/// every way a sweep is told to the driver, in the same dozen pictures.
+/// from an older picture (a wholly dirty reference), and the keyframe at 10
+/// ends the next — every way a sweep is told to the driver, in the same dozen
+/// pictures.
 constexpr int kProofSweep = 4;
 
 /// A right stream sits far above these; the wrong ones of §8o.3 decoded at

@@ -668,7 +668,6 @@ bool VulkanHevcDecoder::decode(const uint8_t* data, size_t size, std::vector<uin
     std::memset(after, 0xFF, sizeof(after));
     std::memset(longTerm, 0xFF, sizeof(longTerm));
     size_t nBefore = 0, nAfter = 0;
-    std::vector<Impl::Held> used;
     for (const HevcSliceFields::Reference& ref : f.shortTerm) {
         const int32_t want = poc + ref.deltaPoc;
         const auto it = std::find_if(d->held.begin(), d->held.end(),
@@ -682,7 +681,6 @@ bool VulkanHevcDecoder::decode(const uint8_t* data, size_t size, std::vector<uin
         }
         kept.push_back(*it);
         if (!ref.used) continue;
-        used.push_back(*it);
         uint8_t* list = ref.deltaPoc < 0 ? before : after;
         size_t& n = ref.deltaPoc < 0 ? nBefore : nAfter;
         if (n >= STD_VIDEO_DECODE_H265_REF_PIC_SET_LIST_SIZE) {
@@ -743,7 +741,6 @@ bool VulkanHevcDecoder::decode(const uint8_t* data, size_t size, std::vector<uin
     std::vector<StdVideoDecodeH265ReferenceInfo> refStd(kept.size());
     std::vector<VkVideoDecodeH265DpbSlotInfoKHR> refDpb(kept.size());
     std::vector<VkVideoReferenceSlotInfoKHR> beginSlots;
-    std::vector<VkVideoReferenceSlotInfoKHR> usedSlots;
     for (size_t k = 0; k < kept.size(); ++k) {
         refStd[k] = {};
         refStd[k].PicOrderCntVal = kept[k].poc;
@@ -756,9 +753,6 @@ bool VulkanHevcDecoder::decode(const uint8_t* data, size_t size, std::vector<uin
         slot.slotIndex = kept[k].slot;
         slot.pPictureResource = &resources[static_cast<size_t>(kept[k].slot)];
         beginSlots.push_back(slot);
-        if (std::any_of(used.begin(), used.end(),
-                        [&](const Impl::Held& h) { return h.slot == kept[k].slot; }))
-            usedSlots.push_back(slot);
     }
     {
         VkVideoReferenceSlotInfoKHR slot = {};
@@ -820,8 +814,13 @@ bool VulkanHevcDecoder::decode(const uint8_t* data, size_t size, std::vector<uin
     info.dstPictureResource.codedExtent = {s.width, s.height};
     info.dstPictureResource.imageViewBinding = d->outputView;
     info.pSetupReferenceSlot = reference ? &setupSlot : nullptr;
-    info.referenceSlotCount = static_cast<uint32_t>(usedSlots.size());
-    info.pReferenceSlots = usedSlots.empty() ? nullptr : usedSlots.data();
+    // Every picture kept, not only the ones this picture uses — as ffmpeg's
+    // Vulkan decoder lists them. RADV on the 780M reads a picture left out
+    // here wrong when a later one predicts from it: the IDR, kept unused
+    // under pictures 2 and 3, then the proof's repair's reference from 73 fps
+    // on (13.8 dB, where ffmpeg reads the same stream at 48; 09/10/2026).
+    info.referenceSlotCount = static_cast<uint32_t>(kept.size());
+    info.pReferenceSlots = kept.empty() ? nullptr : beginSlots.data();
     fn.vkCmdDecodeVideoKHR(cmd, &info);
     VkVideoEndCodingInfoKHR end = {};
     end.sType = VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR;

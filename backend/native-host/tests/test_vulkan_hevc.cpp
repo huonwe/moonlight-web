@@ -254,11 +254,16 @@ void run_vulkan_hevc_tests()
         }
     }
 
-    SECTION("VulkanHevcProof — the product's encoder decodes back to what went in");
-    for (const auto& size : {std::pair<int, int>{1920, 1080}, std::pair<int, int>{1280, 720}}) {
+    SECTION("VulkanHevcProof — the product's encoder decodes back to what went in, at 60 fps and "
+            "at 120, where the repair predicts from the IDR kept since picture 0");
+    struct Case
+    {
+        int width, height, fps;
+    };
+    for (const Case& c : {Case{1920, 1080, 60}, Case{1280, 720, 60}, Case{1920, 1080, 120}}) {
         const encode::VulkanHevcProof proof =
-            encode::proveVulkanHevc(node, size.first, size.second, 60, tuning);
-        std::fprintf(stderr, "  %dx%d: %s, %s in %lld ms — %s\n", size.first, size.second,
+            encode::proveVulkanHevc(node, c.width, c.height, c.fps, tuning);
+        std::fprintf(stderr, "  %dx%d@%d: %s, %s in %lld ms — %s\n", c.width, c.height, c.fps,
                      proof.ran ? "ran" : "did not run", proof.passed ? "passed" : "FAILED",
                      static_cast<long long>(proof.tookMs), proof.summary.c_str());
         if (!id.decodesHevc) {
