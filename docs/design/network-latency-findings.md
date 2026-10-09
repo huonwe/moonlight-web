@@ -1538,6 +1538,29 @@ No bench here; the fix and its numbers are in `652fc726` (not pushed).
   - at 240 fps on the 780M the probe still reads for 3.4-3.9 ms: judge a gain
     from the per-leg breakdown, not from the click alone.
 
+### 09/10/2026 — One LAN session in nine went through the router's hairpin (POC Ultra, relayed by session 59)
+
+DualRTX `--dev` (98276780) → the UM790Pro under Windows, by cable, 120 fps,
+nine passes, 19:29-19:49. Log:
+`bench-out/content-age/u14ux-um-smoke-hevc-sctp-hs-r1-v240-client-r0.server.log`.
+
+- **Eight passes chose the direct IPv6 pair; one chose the hairpin.** Selected
+  pair (line 582): local `prflx 82.67.150.202:46102` → remote
+  `prflx 192.168.1.254:62318`, i.e. through the Freebox's NAT and back.
+- **Why it can win.** With UPnP, the host relays a copy of each IPv4 host
+  candidate as `82.67.150.202 46102 typ host` (the media slot's router hole),
+  **at the same priority as the LAN candidate it copies** (e.g. candidate 6:
+  `192.168.1.66 48550` and `82.67.150.202 46102`, both 2114976511). Copies
+  are also made for the virtual adapters (192.168.56.1, 172.20.240.1,
+  172.29.128.1). ICE then has equal-priority pairs and takes whichever check
+  succeeds first: a race.
+- **Cost:** the sync round trip went from 0.5 to 4.7 ms, and capture → draw
+  gained ~2 ms. Every packet crosses the router twice.
+- **Open, not changed:** give the public copy a lower priority than the LAN
+  host candidate (an srflx-like priority), so a LAN client always prefers the
+  direct pair while a remote client still finds the hole. Until then, a LAN
+  bench pass should log its selected pair and be set aside if it hairpinned.
+
 ## 4. The model so far (04/10/2026)
 
 What the measurements support, in order of the path:
