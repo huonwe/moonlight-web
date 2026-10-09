@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "../../core/ClickTrace.h"
 #include "../IInputSink.h"
 #include "../RecentreDetector.h"
 #include "MacPointerAccel.h"
@@ -81,6 +82,9 @@ public:
     void inject(const InputEvent& event) override;
     /// The captured display's rectangle in POINTS (CoreGraphics' global space).
     void setDisplayRect(int left, int top, int right, int bottom) override;
+    /// The bench's click trace (clicktrace=1): each press timed around its
+    /// CGEventPost. Set before start(); null, the product.
+    void setClickTrace(ClickTrace* trace) { m_ClickTrace = trace; }
 
 private:
     void injectKey(const InputEvent& event, bool down);
@@ -193,6 +197,8 @@ private:
 
     std::atomic<uint32_t> m_SeenTypes{0};
     std::atomic<uint64_t> m_Injected{0};
+
+    ClickTrace* m_ClickTrace = nullptr;
 };
 
 } // namespace mw::native::input

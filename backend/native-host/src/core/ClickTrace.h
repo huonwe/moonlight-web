@@ -29,19 +29,25 @@
 // The click → flag on the client measured 13 to 15 ms between the host
 // receiving the click and the present of the picture that shows the flag, at
 // 120 Hz, and nothing said where. Two kinds of rows, all on the engine's
-// steady clock (QueryPerformanceCounter on Windows, shared by every process,
-// so they line up with the relay's stamps and the latency flag's log):
+// steady clock, which every process of the machine shares, so they line up
+// with the relay's stamps and the latency flag's log (QueryPerformanceCounter
+// on Windows; on macOS the monotonic clock, which ticks with mach time):
 //
 //  - press: a mouse button press handed to the OS. `startUs` and `us` frame
-//    the call (SendInput), `queuedUs` is when it was queued for the thread
-//    that follows the desktop (a SYSTEM worker), 0 when injected directly.
+//    the call (SendInput, CGEventPost), `queuedUs` is when it was queued for
+//    the thread that follows the desktop (a SYSTEM worker), 0 when injected
+//    directly.
 //  - capture: one wake-up of the capture. `startUs` is when it began to wait,
 //    `us` when it returned, `status` what it brought. For a frame: `presentUs`
 //    as the session stamps it, `presentRawUs` the OS's own stamp before any
 //    clamp (WGC's runs ahead), `mouseUs` the pointer's last update (DDA),
-//    `accumulated` the presents folded into it (DDA). Then the compositor's
-//    timing read right after: its last vblank, its refresh period, its last
-//    composition and its frame count (DWM).
+//    `accumulated` the presents folded into it (DDA; on macOS the frames
+//    ScreenCaptureKit handed over since the last one taken, this one
+//    included), `deliveredUs` when the OS handed it to the engine, ahead of
+//    the capture's thread taking it (ScreenCaptureKit's callback). Then the
+//    compositor's timing read right after: its last vblank, its refresh
+//    period, its last composition and its frame count (DWM; on macOS the
+//    captured display's CVDisplayLink, which knows no composition).
 //
 // A field the platform cannot tell is left empty. Only the first kMaxRows rows
 // are kept: minutes of a bench pass, not a session left running.
@@ -72,6 +78,7 @@ public:
         int64_t periodUs = 0;
         int64_t composeUs = 0;
         int64_t composedFrames = -1;
+        int64_t deliveredUs = 0;
     };
 
     static constexpr size_t kMaxRows = size_t(1) << 18;
@@ -113,7 +120,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         std::string out = "kind,us,startUs,queuedUs,status,presentUs,presentRawUs,mouseUs,"
-                          "accumulated,vblankUs,periodUs,composeUs,composedFrames\n";
+                          "accumulated,vblankUs,periodUs,composeUs,composedFrames,deliveredUs\n";
         out.reserve(out.size() + m_Rows.size() * 96);
         const auto num = [&out](int64_t v, bool known) {
             if (known) out += std::to_string(v);
@@ -133,7 +140,8 @@ public:
             num(r.vblankUs, r.vblankUs != 0);
             num(r.periodUs, r.periodUs != 0);
             num(r.composeUs, r.composeUs != 0);
-            if (r.composedFrames >= 0) out += std::to_string(r.composedFrames);
+            num(r.composedFrames, r.composedFrames >= 0);
+            if (r.deliveredUs != 0) out += std::to_string(r.deliveredUs);
             out += '\n';
         }
         return out;

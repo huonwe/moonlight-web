@@ -111,7 +111,10 @@ struct SckCapture::Impl
     /// The newest frame not yet taken. A newer one REPLACES it — no queue.
     CVPixelBufferRef pending = nullptr;
     int64_t pendingPresentUs = 0;
+    int64_t pendingPresentRawUs = 0;
     int64_t pendingCapturedUs = 0;
+    /// Frames handed over since the last one taken, the pending one included.
+    int pendingFolded = 0;
     /// The frame acquire() last handed out, kept alive for the caller.
     CVPixelBufferRef held = nullptr;
     bool lost = false;
@@ -159,6 +162,7 @@ struct SckCapture::Impl
     // Complete (and Started, the very first) carry the compositor's output.
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
     int64_t displayUs = 0;
+    int64_t displayRawUs = 0;
     if (attachments && CFArrayGetCount(attachments) > 0) {
         NSDictionary* info = (__bridge NSDictionary*)CFArrayGetValueAtIndex(attachments, 0);
         NSNumber* status = info[SCStreamFrameInfoStatus];
@@ -176,7 +180,9 @@ struct SckCapture::Impl
             // "how long ago was that" — the two clocks tick together.
             const int64_t agoUs = mw::native::capture::machToUs(mach_absolute_time()) -
                                   mw::native::capture::machToUs(displayTime.unsignedLongLongValue);
-            displayUs = mw::native::capture::steadyNowUs() - (agoUs > 0 ? agoUs : 0);
+            const int64_t steadyUs = mw::native::capture::steadyNowUs();
+            displayUs = steadyUs - (agoUs > 0 ? agoUs : 0);
+            displayRawUs = steadyUs - agoUs;
         }
     }
 
@@ -201,9 +207,11 @@ struct SckCapture::Impl
             mw::native::capture::attachmentString(image, kCVImageBufferYCbCrMatrixKey));
     }
     if (d->pending) d->replaced++;
+    d->pendingFolded = d->pending ? d->pendingFolded + 1 : 1;
     d->clearPending();
     d->pending = CVPixelBufferRetain(image);
     d->pendingPresentUs = displayUs > 0 ? displayUs : nowUs;
+    d->pendingPresentRawUs = displayRawUs;
     d->pendingCapturedUs = nowUs;
     d->delivered++;
     d->cv.notify_one();
@@ -415,6 +423,11 @@ bool SckCapture::start(std::string& error)
         // which ones the stream carries, the same way it does on Windows.
         config.minimumFrameInterval = CMTimeMake(1000, m_RefreshMilliHz);
         config.queueDepth = 3;
+        // The bench's own (plan « attente », AM2): what each costs a click.
+        if (m_BenchIntervalUs >= 0)
+            config.minimumFrameInterval =
+                m_BenchIntervalUs == 0 ? kCMTimeZero : CMTimeMake(m_BenchIntervalUs, 1000000);
+        if (m_BenchDepth > 0) config.queueDepth = m_BenchDepth;
         config.showsCursor = m_ShowsCursor;
 
         // The host's sound, when the session asked for it. 48 kHz stereo is
@@ -500,7 +513,13 @@ bool SckCapture::start(std::string& error)
               (m_Hdr ? " 10-bit BT.2020 PQ (x420) at " : " NV12 at ") +
               std::to_string((m_RefreshMilliHz + 500) / 1000) + " Hz, pointer " +
               (m_ShowsCursor ? "in the picture" : "left out") +
-              (m_AudioActive ? ", with the host's audio (48 kHz stereo)" : ""));
+              (m_AudioActive ? ", with the host's audio (48 kHz stereo)" : "") +
+              (m_BenchDepth > 0 || m_BenchIntervalUs >= 0
+                   ? ", bench queue depth " + std::to_string(d->config.queueDepth) +
+                         ", least interval " +
+                         (m_BenchIntervalUs >= 0 ? std::to_string(m_BenchIntervalUs) + " us"
+                                                 : std::string("one refresh"))
+                   : std::string()));
     return true;
 }
 
@@ -574,6 +593,9 @@ AcquireStatus SckCapture::acquire(int timeoutMs, SckFrame& frame)
     frame.height = m_Height;
     frame.presentUs = d->pendingPresentUs;
     frame.capturedUs = d->pendingCapturedUs;
+    frame.presentRawUs = d->pendingPresentRawUs;
+    frame.accumulated = d->pendingFolded;
+    d->pendingFolded = 0;
     return AcquireStatus::Ok;
 }
 

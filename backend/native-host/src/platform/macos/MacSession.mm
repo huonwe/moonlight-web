@@ -23,6 +23,7 @@
 #include "../../capture/macos/SckCapture.h"
 #include "../../convert/CursorBlend.h"
 #include "../../core/CadenceAlign.h"
+#include "../../core/ClickTrace.h"
 #include "../../core/CursorPositionGate.h"
 #include "../../core/FrameCadence.h"
 #include "../../core/Log.h"
@@ -36,7 +37,9 @@
 
 #import <AppKit/AppKit.h>
 
+#include <CoreVideo/CoreVideo.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
+#include <mach/mach_time.h>
 
 #include <algorithm>
 #include <atomic>
@@ -102,6 +105,116 @@ FrameStamps resendStamps(int64_t nowUs)
 {
     return FrameStamps{nowUs, nowUs, nowUs, nowUs};
 }
+
+const char* acquireStatusName(capture::AcquireStatus status)
+{
+    switch (status) {
+    case capture::AcquireStatus::Ok: return "ok";
+    case capture::AcquireStatus::Timeout: return "timeout";
+    case capture::AcquireStatus::PointerOnly: return "pointer";
+    case capture::AcquireStatus::Lost: return "lost";
+    case capture::AcquireStatus::Failed: return "failed";
+    }
+    return "";
+}
+
+/// mach_absolute_time ticks → microseconds (1:1 on Apple Silicon, 125:3 on
+/// Intel), as SckCapture converts.
+int64_t machToUs(uint64_t ticks)
+{
+    static mach_timebase_info_data_t info = [] {
+        mach_timebase_info_data_t i;
+        mach_timebase_info(&i);
+        return i;
+    }();
+    return static_cast<int64_t>(ticks * info.numer / info.denom / 1000);
+}
+
+// The captured display's refresh, for the bench's click trace (clicktrace=1):
+// macOS has no DWM timing to read after a capture, and the nearest is a
+// CVDisplayLink on that display — the vsync it last reported, its period, and
+// how many it reported. Nothing of the window server's composition: no API
+// says when it composed.
+//
+// CVDisplayLink is deprecated since macOS 15 for the display links of NSView
+// and NSScreen, which want a view or a screen object; this one only wants the
+// display's id, which is what the session has. Bench only.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+class DisplayClock
+{
+public:
+    DisplayClock() = default;
+    DisplayClock(const DisplayClock&) = delete;
+    DisplayClock& operator=(const DisplayClock&) = delete;
+    ~DisplayClock() { stop(); }
+
+    uint32_t display() const { return m_Display; }
+
+    void start(uint32_t display)
+    {
+        stop();
+        m_Display = display;
+        m_Count.store(0);
+        if (CVDisplayLinkCreateWithCGDisplay(display, &m_Link) != kCVReturnSuccess || !m_Link) {
+            m_Link = nullptr;
+            log::warning("[native] click trace: no CVDisplayLink on display " +
+                         std::to_string(display) + " — the trace goes without its refresh");
+            return;
+        }
+        CVDisplayLinkSetOutputCallback(m_Link, &DisplayClock::tick, this);
+        if (CVDisplayLinkStart(m_Link) != kCVReturnSuccess) {
+            log::warning("[native] click trace: the CVDisplayLink of display " +
+                         std::to_string(display) + " would not start");
+            stop();
+            m_Display = display; // not retried on every wake-up
+        }
+    }
+
+    void stop()
+    {
+        if (m_Link) {
+            CVDisplayLinkStop(m_Link);
+            CVDisplayLinkRelease(m_Link);
+            m_Link = nullptr;
+        }
+        m_Display = 0;
+    }
+
+    /// The last vsync reported, on the steady clock, the refresh period and
+    /// how many vsyncs since start(); false before the first.
+    bool read(int64_t& vsyncUs, int64_t& periodUs, int64_t& count) const
+    {
+        count = m_Count.load();
+        if (count == 0) return false;
+        vsyncUs = m_VsyncUs.load();
+        periodUs = m_PeriodUs.load();
+        return true;
+    }
+
+private:
+    static CVReturn tick(CVDisplayLinkRef, const CVTimeStamp* now, const CVTimeStamp*,
+                         CVOptionFlags, CVOptionFlags*, void* context)
+    {
+        auto* self = static_cast<DisplayClock*>(context);
+        // Mach time onto the steady clock through "how long ago", as
+        // SckCapture does: the two tick together.
+        const int64_t agoUs = machToUs(mach_absolute_time()) - machToUs(now->hostTime);
+        self->m_VsyncUs.store(steadyNowUs() - agoUs);
+        if (now->videoTimeScale > 0 && now->videoRefreshPeriod > 0)
+            self->m_PeriodUs.store(static_cast<int64_t>(now->videoRefreshPeriod) * 1000000 /
+                                   now->videoTimeScale);
+        self->m_Count.fetch_add(1);
+        return kCVReturnSuccess;
+    }
+
+    CVDisplayLinkRef m_Link = nullptr;
+    uint32_t m_Display = 0;
+    std::atomic<int64_t> m_VsyncUs{0};
+    std::atomic<int64_t> m_PeriodUs{0};
+    std::atomic<int64_t> m_Count{0};
+};
+#pragma clang diagnostic pop
 
 std::string hzString(int milliHz)
 {
@@ -320,6 +433,7 @@ public:
             auto sink = std::make_unique<input::CgInput>();
             const capture::DesktopRect rect = m_Capture->desktopRect();
             sink->setDisplayRect(rect.left, rect.top, rect.right, rect.bottom);
+            if (m_Config.tuning.clickTrace) sink->setClickTrace(&m_ClickTrace);
             std::string inputError;
             if (sink->start(inputError))
                 m_Input = std::move(sink);
@@ -395,6 +509,7 @@ public:
             if (m_Input) m_Input->stop();
             m_Input.reset();
         }
+        m_DisplayClock.stop();
         if (m_KeepAwake != kIOPMNullAssertionID) {
             IOPMAssertionRelease(m_KeepAwake);
             m_KeepAwake = kIOPMNullAssertionID;
@@ -573,6 +688,16 @@ public:
         m_Input->inject(event);
     }
 
+    std::string clickTraceCsv() const override
+    {
+        if (!m_Config.tuning.clickTrace) return {};
+        if (m_ClickTrace.dropped() > 0)
+            log::warning("[native] click trace: full, " + std::to_string(m_ClickTrace.dropped()) +
+                         " rows past the first " + std::to_string(ClickTrace::kMaxRows) +
+                         " not kept");
+        return m_ClickTrace.csv();
+    }
+
     void setCompositeCursor(bool composite, int cursorFramePx) override
     {
         // Three ways to show the pointer: the compositor draws it (composite,
@@ -720,11 +845,42 @@ private:
     /// a size asked for it (the small screen). Read on the capture thread.
     bool selfDrawn() const { return m_CompositeCursor.load() && m_CursorFramePx.load() > 0; }
 
+    /// One wake-up of the capture into the click trace (clicktrace=1): what it
+    /// brought, ScreenCaptureKit's stamps on it, and the captured display's
+    /// last refresh read right after (DisplayClock). Capture thread only.
+    void traceCapture(capture::AcquireStatus status, const capture::SckFrame& frame,
+                      int64_t startUs, int64_t doneUs)
+    {
+        // Started on the first wake-up, and again when the capture moved to
+        // another display (a restart on the virtual display's successor).
+        if (m_DisplayClock.display() != m_Display.displayId)
+            m_DisplayClock.start(m_Display.displayId);
+        ClickTrace::Row row;
+        row.kind = ClickTrace::Kind::Capture;
+        row.us = doneUs;
+        row.startUs = startUs;
+        row.status = acquireStatusName(status);
+        if (status == capture::AcquireStatus::Ok) {
+            row.presentUs = frame.presentUs;
+            row.presentRawUs = frame.presentRawUs;
+            row.accumulated = frame.accumulated;
+            row.deliveredUs = frame.capturedUs;
+        }
+        int64_t vsyncUs = 0, periodUs = 0, vsyncs = 0;
+        if (m_DisplayClock.read(vsyncUs, periodUs, vsyncs)) {
+            row.vblankUs = vsyncUs;
+            row.periodUs = periodUs;
+            row.composedFrames = vsyncs;
+        }
+        m_ClickTrace.add(row);
+    }
+
     bool openCapture(int outputWidth, int outputHeight, std::string& error)
     {
         m_Capture = std::make_unique<capture::SckCapture>(
             m_Display.displayId, outputWidth, outputHeight, m_DisplayMilliHz,
             m_CompositeCursor.load() && !selfDrawn(), m_Target.hdr);
+        m_Capture->setBenchQueue(m_Config.tuning.sckQueueDepth, m_Config.tuning.sckMinIntervalUs);
         m_Patch = convert::PlanePatch{};
         // Set on every open, restarts included: the sink outlives the capture,
         // and while a display is away the pacer keeps the wire fed with silence.
@@ -1060,8 +1216,11 @@ private:
             }
 
             capture::SckFrame fresh;
+            const int64_t acquireStartUs = steadyNowUs();
             const capture::AcquireStatus status =
                 modeChanged ? capture::AcquireStatus::Lost : m_Capture->acquire(timeoutMs, fresh);
+            if (m_Config.tuning.clickTrace && !modeChanged)
+                traceCapture(status, fresh, acquireStartUs, steadyNowUs());
 
             if (status != capture::AcquireStatus::Timeout && boosted) {
                 boosted = false;
@@ -1640,6 +1799,11 @@ private:
 
     std::mutex m_InputMutex;
     std::unique_ptr<input::CgInput> m_Input;
+
+    /// The bench's click trace (EncoderTuning::clickTrace), and the captured
+    /// display's refresh it reads. Capture thread, and the input's.
+    ClickTrace m_ClickTrace;
+    DisplayClock m_DisplayClock;
 
     /// The mode the capture was last opened on, in pixels — see
     /// displayModeChanged. Capture thread only, after start().

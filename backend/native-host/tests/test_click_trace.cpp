@@ -44,12 +44,33 @@ void run_click_trace_tests()
         const std::string csv = trace.csv();
         const std::string header =
             "kind,us,startUs,queuedUs,status,presentUs,presentRawUs,mouseUs,accumulated,"
-            "vblankUs,periodUs,composeUs,composedFrames\n";
+            "vblankUs,periodUs,composeUs,composedFrames,deliveredUs\n";
         CHECK_EQ(csv.substr(0, header.size()), header);
         CHECK_EQ(csv.substr(header.size()),
-                 std::string("press,1012,1000,,,,,,,,,,\n"
-                             "capture,9000,2000,,ok,8500,8500,,1,8333,8333,8400,77\n"));
+                 std::string("press,1012,1000,,,,,,,,,,,\n"
+                             "capture,9000,2000,,ok,8500,8500,,1,8333,8333,8400,77,\n"));
         CHECK_EQ(trace.rows(), size_t(2));
+    }
+
+    SECTION("ClickTrace — macOS: the frame's delivery, no composition");
+    {
+        ClickTrace trace;
+        ClickTrace::Row row;
+        row.kind = ClickTrace::Kind::Capture;
+        row.us = 9000;
+        row.startUs = 8000;
+        row.status = "ok";
+        row.presentUs = 8500;
+        row.presentRawUs = 8500;
+        row.accumulated = 2;
+        row.vblankUs = 8333;
+        row.periodUs = 16667;
+        row.composedFrames = 5;
+        row.deliveredUs = 8900;
+        trace.add(row);
+        const std::string csv = trace.csv();
+        CHECK(csv.find("\ncapture,9000,8000,,ok,8500,8500,,2,8333,16667,,5,8900\n") !=
+              std::string::npos);
     }
 
     SECTION("ClickTrace — a press queued for the follower keeps the moment it was queued");

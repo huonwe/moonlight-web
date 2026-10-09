@@ -847,7 +847,13 @@ void CgInput::injectMouseButton(int button, bool down)
     // Pressed where the pointer IS: after relative moves only the window
     // server knows, and a click at a stale spot would move a detached pointer.
     syncPointer();
+    if (!m_ClickTrace || !down) {
+        postButton(button, down, m_X, m_Y);
+        return;
+    }
+    const int64_t startUs = steadyNowUs();
     postButton(button, down, m_X, m_Y);
+    m_ClickTrace->press(0, startUs, steadyNowUs());
 }
 
 void CgInput::postButton(int button, bool down, double x, double y)

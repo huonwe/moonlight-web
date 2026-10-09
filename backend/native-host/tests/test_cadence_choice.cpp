@@ -287,6 +287,19 @@ void run_cadence_choice_tests()
         CHECK_EQ(t.audioFrameSamples(), 960);
     }
 
+    // ScreenCaptureKit's queue (plan « attente », AM2): the product's unless
+    // said, and 0 is a value of its own for the interval (none at all).
+    SECTION("sckdepth= / sckinterval= — default unless set, an interval of 0 named");
+    {
+        EncoderTuning t;
+        CHECK(t.isDefault());
+        t.sckMinIntervalUs = 0;
+        CHECK(!t.isDefault());
+        CHECK_EQ(t.describe(), std::string("sckinterval=0"));
+        t.sckQueueDepth = 1;
+        CHECK_EQ(t.describe(), std::string("sckdepth=1 sckinterval=0"));
+    }
+
     // A client whose decoder falls silent under the reference repairs asks for
     // none (/start's ref_invalidation): the bench's dpb=1, on every encoder.
     SECTION("refuseReferenceRepairs — one reference for that client, a bench's dpb kept");

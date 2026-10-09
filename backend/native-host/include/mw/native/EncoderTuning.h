@@ -441,6 +441,13 @@ struct EncoderTuning
     /// « attente », A0; see src/core/ClickTrace.h). false, the product:
     /// nothing kept.
     bool clickTrace = false;
+    /// ScreenCaptureKit's pool of surfaces (SCStreamConfiguration.queueDepth,
+    /// macOS host; plan « attente », AM2). 0, the product: 3.
+    int sckQueueDepth = 0;
+    /// The least time between two ScreenCaptureKit frames, µs
+    /// (minimumFrameInterval, macOS host; plan « attente », AM2). 0: none at
+    /// all. -1, the product: one refresh of the captured display.
+    int sckMinIntervalUs = -1;
     /// The relay hands a frame's chunks to SCTP at this many times the
     /// stream's bitrate at most, paceBurstKb at a time (plan Wi-Fi W2 A:
     /// a frame sent in one run overflows the browser's UDP socket on Wi-Fi).
@@ -531,7 +538,7 @@ struct EncoderTuning
                aroadWindowKb == 0 && aroadBudgetPct == 0 && !relayLog && paceMultiple == 0 &&
                paceBurstKb == 0 && retransCutPermille < 0 && sctpBufferKb == 0 && linkHoldMs == 0 &&
                sctpMaxBurst < 0 && sctpScheduler < 0 && !audioLog && audioFrameMs == 0 &&
-               !clickTrace;
+               !clickTrace && sckQueueDepth == 0 && sckMinIntervalUs < 0;
     }
 
     /// One line naming every field that is NOT at its default, for the log and
@@ -652,6 +659,8 @@ struct EncoderTuning
         if (audioLog) add("audiolog=1");
         if (audioFrameMs > 0) add("audioframe=" + std::to_string(audioFrameMs));
         if (clickTrace) add("clicktrace=1");
+        if (sckQueueDepth > 0) add("sckdepth=" + std::to_string(sckQueueDepth));
+        if (sckMinIntervalUs >= 0) add("sckinterval=" + std::to_string(sckMinIntervalUs));
         return s;
     }
 };

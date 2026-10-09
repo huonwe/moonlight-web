@@ -93,7 +93,15 @@ struct SckFrame
     /// The compositor's own display time of this frame, on the engine's
     /// steady clock — SCK reports it in mach time, converted once.
     int64_t presentUs = 0;
+    /// When SCK handed it over (its callback), on the same clock.
     int64_t capturedUs = 0;
+
+    /// For the click trace (core/ClickTrace.h): the display time before
+    /// presentUs's clamp to the callback's moment (0 when SCK gave none), and
+    /// how many frames SCK handed over since the last one taken, this one
+    /// included — the others were superseded unseen.
+    int64_t presentRawUs = 0;
+    int accumulated = 0;
 };
 
 class SckCapture
@@ -118,6 +126,15 @@ public:
     /// BEFORE start(): whether a stream captures audio is fixed when it is
     /// built. A null callback turns it back off.
     void setAudioSink(AudioSampleCallback onSamples);
+
+    /// The bench's own surface pool (queueDepth, 0: the product's 3) and
+    /// least interval between frames (µs; 0 none, -1 the product's one
+    /// refresh): plan « attente », AM2. Before start().
+    void setBenchQueue(int depth, int minIntervalUs)
+    {
+        m_BenchDepth = depth;
+        m_BenchIntervalUs = minIntervalUs;
+    }
 
     /// True once start() has actually got an audio tap — false when the sink
     /// was set but the OS is older than macOS 13, which is the one case where
@@ -165,6 +182,8 @@ private:
     bool m_ShowsCursor = true;
     bool m_Hdr = false;
     bool m_AudioActive = false;
+    int m_BenchDepth = 0;
+    int m_BenchIntervalUs = -1;
     DesktopRect m_Rect;
 };
 

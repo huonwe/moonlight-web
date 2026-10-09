@@ -251,7 +251,11 @@ const char* const kUsage =
     "  clicktrace=0|1    the click's way through the host: each press handed to the OS,\n"
     "                    each wake-up of the capture with the OS's and the compositor's\n"
     "                    stamps, a CSV next to the log when the session ends (Windows\n"
-    "                    host; plan attente, A0)\n"
+    "                    and macOS hosts; plan attente, A0 and AM0)\n"
+    "  sckdepth=<n>      ScreenCaptureKit's pool of surfaces (queueDepth), 1-8; 3 the\n"
+    "                    product (macOS host; plan attente, AM2)\n"
+    "  sckinterval=<us>  the least time between two ScreenCaptureKit frames, 0-100000;\n"
+    "                    0 none, one display refresh the product (macOS host; AM2)\n"
     "the bench's own:\n"
     "  dump=<path>      the encoded stream as it comes out (Annex-B, or OBUs for AV1)\n"
     "  lose=<frames>[x<burst>][k]  every N frames, report the latest one lost (reference\n"
@@ -585,6 +589,12 @@ bool applyTuningKey(const QString& key, const QString& value, mw::native::Encode
         const int v = value.toInt(&ok);
         ok = ok && (v == 0 || v == 1);
         tuning.clickTrace = v == 1;
+    } else if (key == "sckdepth") {
+        tuning.sckQueueDepth = value.toInt(&ok);
+        ok = ok && tuning.sckQueueDepth >= 1 && tuning.sckQueueDepth <= 8;
+    } else if (key == "sckinterval") {
+        tuning.sckMinIntervalUs = value.toInt(&ok);
+        ok = ok && tuning.sckMinIntervalUs >= 0 && tuning.sckMinIntervalUs <= 100000;
     } else if (key == "pace") {
         tuning.paceMultiple = value.toInt(&ok);
         ok = ok && tuning.paceMultiple >= 0 && tuning.paceMultiple <= 50;
