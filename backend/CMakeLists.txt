@@ -353,8 +353,10 @@ endif()
 if(APPLE)
     target_sources(mw-server PRIVATE src/LatencyFlagMac.mm)
     target_compile_definitions(mw-server PRIVATE MW_LATENCY_FLAG_MAC)
-    # CGEventTap + NSWindow. Foundation/Security are already linked below.
-    target_link_libraries(mw-server PRIVATE "-framework AppKit" "-framework ApplicationServices")
+    # CGEventTap + NSWindow, and CATransaction to hand the flag to the window
+    # server at once. Foundation/Security are already linked below.
+    target_link_libraries(mw-server PRIVATE "-framework AppKit" "-framework ApplicationServices"
+                                            "-framework QuartzCore")
 elseif(UNIX)
     # Optional, like the native host's own Linux dependencies: without the X11
     # headers CMake still builds — the stub, whose unsupportedReason() names the

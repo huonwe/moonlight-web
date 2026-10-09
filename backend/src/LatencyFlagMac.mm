@@ -59,6 +59,21 @@
  * ScreenCaptureKit captures these windows: the native host's filter is built
  * with excludingWindows:@[] (SckCapture.mm), so nothing of ours is filtered out
  * of the picture. Sunshine on this machine captures the display too.
+ *
+ * ── The bench's two stamps (plan « attente », AM0) ──────────────────────────
+ *
+ * Each injected click logs when the tap saw it ("hooked") and when the main
+ * thread had drawn the flag and handed it to the window server ("shown": after
+ * displayIfNeeded and a CATransaction flush), on the steady clock the native
+ * host's click trace uses — the same line as Windows. macOS gives no moment
+ * for the window server composing it (Windows' DwmFlush): MW_LATENCY_FLAG_TRACE
+ * adds nothing here, the capture's display time of the frame that carried the
+ * flag says the rest.
+ *
+ * MW_LATENCY_FLAG_SKIP in the server's environment keeps the flag off some
+ * screens, as on Windows: "*" for all of them (the tap still logs, and the
+ * bench's tools/click-target draws the flag itself), or a display's id
+ * (CGDirectDisplayID) or name (NSScreen.localizedName).
  */
 
 #include "LatencyFlag.h"
@@ -66,9 +81,12 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <Foundation/Foundation.h>
+#import <QuartzCore/QuartzCore.h>
 
 #include <QDebug>
+#include <QRegularExpression>
 #include <QString>
+#include <QStringList>
 
 #include <atomic>
 #include <chrono>
@@ -158,6 +176,35 @@ void destroyWindowsOnMain()
     g_Windows = nil;
 }
 
+long long steadyNowUs()
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+/// Whether MW_LATENCY_FLAG_SKIP names this screen: "*", its display id or its
+/// name, separated by commas or semicolons (a name has spaces). @p name says
+/// which screen it is, for the log.
+bool skipped(NSScreen* screen, QString& name)
+{
+    NSNumber* number = [[screen deviceDescription] objectForKey:@"NSScreenNumber"];
+    const QString id = number ? QString::number(number.unsignedIntValue) : QString();
+    QString localized;
+    if (@available(macOS 10.15, *)) localized = QString::fromNSString([screen localizedName]);
+    name = localized.isEmpty() ? id : localized + QStringLiteral(" (") + id + QStringLiteral(")");
+    const QStringList skip =
+        qEnvironmentVariable("MW_LATENCY_FLAG_SKIP")
+            .split(QRegularExpression(QStringLiteral("[;,]+")), Qt::SkipEmptyParts);
+    for (const QString& entry : skip) {
+        const QString e = entry.trimmed();
+        if (e == QStringLiteral("*") || (!id.isEmpty() && e == id) ||
+            (!localized.isEmpty() && e.compare(localized, Qt::CaseInsensitive) == 0))
+            return true;
+    }
+    return false;
+}
+
 /**
  * One flag per screen, each at the same fraction of its own screen.
  *
@@ -178,9 +225,18 @@ void createWindowsOnMain()
     g_Windows = [[NSMutableArray alloc] init];
 
     NSMutableString* description = [NSMutableString string];
+    int skippedScreens = 0;
     for (NSScreen* screen in [NSScreen screens]) {
         const NSRect f = [screen frame];
         if (f.size.width <= 0 || f.size.height <= 0) continue;
+        QString name;
+        if (skipped(screen, name)) {
+            // Armed all the same: the tap logs every injected click, and
+            // something else draws the flag (tools/click-target).
+            qInfo() << "[LatencyFlag] no flag on" << name << "(MW_LATENCY_FLAG_SKIP)";
+            ++skippedScreens;
+            continue;
+        }
 
         NSRect r;
         r.origin.x = f.origin.x + f.size.width * LatencyFlag::kLeft;
@@ -221,7 +277,7 @@ void createWindowsOnMain()
     }
 
     if ([g_Windows count] == 0) {
-        qWarning() << "[LatencyFlag] no screen to draw on";
+        if (skippedScreens == 0) qWarning() << "[LatencyFlag] no screen to draw on";
         return;
     }
     qInfo() << "[LatencyFlag] armed on" << static_cast<int>([g_Windows count])
@@ -239,6 +295,9 @@ void showAllOnMain()
         // AppKit gets back to its own display pass otherwise.
         [[w contentView] displayIfNeeded];
     }
+    // And hand it to the window server now, not when this turn of the run
+    // loop ends: the moment logged as "shown" is then the one it has it.
+    [CATransaction flush];
 }
 
 void hideAllOnMain()
@@ -247,14 +306,24 @@ void hideAllOnMain()
         [w orderOut:nil];
 }
 
-/// Show, and schedule the hide. Called from the tap thread.
-void flash()
+/// Show, and schedule the hide. Called from the tap thread, @p hookUs when it
+/// saw the click at @p where.
+void flash(long long hookUs, CGPoint where)
 {
     const unsigned long long epoch = ++g_ShowEpoch;
     runOnMain(
         ^{
             @autoreleasepool {
                 showAllOnMain();
+                // One line per injected click, so a run can be matched against
+                // the browser's table (and a tap that never fires shows as
+                // silence): when the tap saw it and when the flag was handed
+                // to the window server, on the steady clock the relay and the
+                // native host's click trace stamp with (plan « attente »).
+                const long long shownUs = steadyNowUs();
+                qInfo() << "[LatencyFlag] injected click at" << static_cast<int>(where.x) << ","
+                        << static_cast<int>(where.y) << "— hooked at steady" << hookUs
+                        << "us, shown at steady" << shownUs << "us";
             }
         },
         false);
@@ -284,20 +353,7 @@ CGEventRef tapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event
     if (type == kCGEventLeftMouseDown) {
         const int64_t state = CGEventGetIntegerValueField(event, kCGEventSourceStateID);
         const bool injected = state != kCGEventSourceStateHIDSystemState;
-        if (injected) {
-            flash();
-            // One line per injected click, so a run can be matched against the
-            // browser's table (and a tap that never fires shows as silence),
-            // with when the flag was asked up on the steady clock the relay
-            // stamps frames with (plan Wi-Fi W1, scripts/bench/wifi). The
-            // window shows on the main thread just after.
-            const long long shownUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                          std::chrono::steady_clock::now().time_since_epoch())
-                                          .count();
-            const CGPoint p = CGEventGetLocation(event);
-            qInfo() << "[LatencyFlag] injected click at" << static_cast<int>(p.x) << ","
-                    << static_cast<int>(p.y) << "— shown at steady" << shownUs << "us";
-        }
+        if (injected) flash(steadyNowUs(), CGEventGetLocation(event));
     }
     return event;
 }
@@ -386,6 +442,10 @@ void setEnabled(bool enabled)
 
         if (g_Thread.joinable()) g_Thread.join(); // a thread that bailed out early
         g_Running = true;
+        if (qEnvironmentVariableIntValue("MW_LATENCY_FLAG_TRACE") == 1)
+            qInfo() << "[LatencyFlag] bench trace (MW_LATENCY_FLAG_TRACE=1): macOS says nothing "
+                       "of the window server composing the flag — each click logs the tap and "
+                       "the show only";
 
         runOnMain(
             ^{
