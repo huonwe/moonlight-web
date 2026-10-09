@@ -114,9 +114,10 @@ def read_relay(log_path):
     return sorted(out)
 
 
-def client_flag_frames(base):
+def client_flag_frames(base, from_draw=False):
     """Per click the client measured, the host stamp (ms) of the frame that
-    showed the flag, and the click's host time estimated (µs)."""
+    showed the flag, and the click's host time estimated (µs). @p from_draw:
+    the probe dated the flag from its frame's draw (since 652fc726)."""
     if not (os.path.exists(base + ".json") and os.path.exists(base + ".clicks.frames.csv")):
         return [], []
     j = json.load(open(base + ".json"))
@@ -141,7 +142,17 @@ def client_flag_frames(base):
         if not s.get("ok"):
             continue
         ck = s["ts"] / 1000 - org
-        i = bisect.bisect_right(drawn, ck + s["latencyMs"]) - 1
+        seen = ck + s["latencyMs"]
+        i = bisect.bisect_right(drawn, seen) - 1
+        # Since 652fc726 the probe dates the flag from its frame's draw, before
+        # the renderer reads it back, while drawnMs is logged after that read:
+        # the click is then seen inside the draw of the frame that showed it
+        # (decoded <= seen < drawn), the one after the last drawn before it.
+        # Not for a pass before: its flag was seen just after its own frame's
+        # drawnMs, and the next frame may already be decoded by then.
+        nxt = fr[i + 1] if from_draw and i + 1 < len(fr) else None
+        if nxt and nxt.get("decodedMs") is not None and nxt["decodedMs"] - 0.05 <= seen < nxt["drawnMs"]:
+            i += 1
         if i < 0:
             continue
         out.append({"frameMs": fr[i]["hostMs"], "clickUs": (ck + off) * 1000})
@@ -203,7 +214,7 @@ def one(tag, a):
     log = base + ".server.log"
     flags = read_target(a.target) if a.target else read_flags(log)
     relay = read_relay(log) if os.path.exists(log) else []
-    seen, client_ms = client_flag_frames(base)
+    seen, client_ms = client_flag_frames(base, a.from_draw)
     seen.sort(key=lambda s: s["frameMs"])
     x = stamp_offset(client_ms, present)
     grid = refresh_grid(present)
@@ -314,6 +325,8 @@ def main():
     ap.add_argument("--target", help="mw-click-target's log, for its clicks instead of the flag's")
     ap.add_argument("--clicks", action="store_true", help="every click, not only the summary")
     ap.add_argument("--pool", action="store_true", help="all the tags' clicks in one summary too")
+    ap.add_argument("--from-draw", action="store_true",
+                    help="the client's probe dated the flag from the draw (passes since 652fc726)")
     a = ap.parse_args()
     pooled = []
     for t in a.tags:

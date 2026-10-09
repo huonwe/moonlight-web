@@ -53,7 +53,12 @@ did not carry it).
 
 The frame that showed the flag is the client's, when the pass has
 `<tag>.json` and `<tag>.clicks.frames.csv`; otherwise the first presented after
-the flag was composed.
+the flag was composed. For a pass made since `652fc726`, give `--from-draw`:
+the probe then dates the flag from its frame's draw, before the renderer reads
+it back, and the frame is the one whose draw holds that moment, not the last
+one drawn before it. Without the option, such a pass is credited to the frame
+before (a host share far too small); with it, an older pass may be credited to
+the frame after.
 
 ## A, every frame — presentmon.py
 
