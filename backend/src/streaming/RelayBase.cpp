@@ -17,6 +17,7 @@
 
 #include "RelayBase.h"
 
+#include "IcePriority.h"
 #include "server/NetClassify.h"
 
 #include <rtc/rtc.hpp>
@@ -141,8 +142,15 @@ void RelayBase::emitLocalCandidate(const rtc::Candidate& candidate, const char* 
                 emit signalingIceCandidate(candidate.candidate(), std::string(candidate.mid()));
             try {
                 modCandidate.changeAddress(m_PublicIP, m_PublicPort);
+                // A reflexive address's priority, below the LAN host candidate
+                // just emitted: a same-LAN peer then prefers the direct pair to
+                // the router's hairpin instead of racing them (IcePriority.h).
+                const uint32_t priority = mw::ice::srflxPriority(candidate.priority());
+                modCandidate = rtc::Candidate(
+                    mw::ice::withPriority(modCandidate.candidate(), priority), candidate.mid());
                 qInfo() << logTag << "Host candidate ->" << QString::fromStdString(m_PublicIP)
-                        << ":" << m_PublicPort << (m_EmitLanCandidate ? "(+ LAN)" : "");
+                        << ":" << m_PublicPort << "priority" << priority
+                        << (m_EmitLanCandidate ? "(+ LAN)" : "");
             } catch (const std::exception& e) {
                 qWarning() << logTag << "Failed to rewrite candidate:" << e.what();
             }

@@ -73,6 +73,7 @@ add_executable(run_tests
     test_host_os_probe.cpp
     test_send_backlog.cpp
     test_relay_frame_log.cpp
+    test_ice_priority.cpp
     test_audio_path_log.cpp
     test_send_pacer.cpp
     test_link_loss.cpp

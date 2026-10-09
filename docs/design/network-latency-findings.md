@@ -1560,6 +1560,17 @@ nine passes, 19:29-19:49. Log:
   host candidate (an srflx-like priority), so a LAN client always prefers the
   direct pair while a remote client still finds the hole. Until then, a LAN
   bench pass should log its selected pair and be set aside if it hairpinned.
+- **Done the same evening** (Bruno's go via session 59). The copy now carries
+  a server-reflexive type preference (100 instead of 126, the low 24 bits
+  kept): 2114976511 → 1678768895 (`RelayBase::emitLocalCandidate`,
+  `IcePriority.h`). Bench, 20:41-21:06: `build\` with the change, one `--dev`
+  per pass, ten short passes (`still`) to the UM790Pro under Windows by cable
+  (`series.py um --prefix ice`). The log shows each copy at its new priority;
+  **10 of 10 chose the direct IPv6 pair, 0 the hairpin**. The `--dev` held no
+  UDP port in 3478-3481. Limit: the priority orders the browser's checks, but
+  libjuice, the controlling agent, nominates on its own pair priorities, so
+  this narrows the race rather than closing it by construction; at the old 1
+  in 9, ten clean passes are encouraging, not proof.
 
 ## 4. The model so far (04/10/2026)
 
