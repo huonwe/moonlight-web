@@ -536,12 +536,13 @@ Rien n'attend jamais sur le thread de capture. La grille avance d'un intervalle
 à chaque présent admis (jamais « maintenant + intervalle », sinon la cadence
 dérive — mesuré 56 fps pour 60) ; un présent qui arrive un peu **avant**
 l'échéance, dans le quart d'intervalle qui la précède, passe aussi, plutôt que
-d'attendre une période d'écran entière pour le suivant. La grille n'est
-**ré-ancrée** sur le présent admis que s'il est en retard de plus d'une
-période d'écran, c'est-à-dire qu'un présent manquait là où la grille en
-attendait un : écran resté fixe, boucle bloquée, ou jeu tournant au fps du
-stream mais déphasé — auquel cas la grille se verrouille sur lui au lieu de
-battre contre lui (une image sautée une fois, pas à chaque intervalle).
+d'attendre une période d'écran entière pour le suivant. La grille n'était
+**ré-ancrée** sur le présent admis que s'il était en retard de plus d'une
+période d'écran, pris pour un présent manquant : écran resté fixe, boucle
+bloquée, ou jeu tournant au fps du stream mais déphasé — auquel cas la grille
+se verrouillait sur lui au lieu de battre contre lui. Cette règle prenait
+aussi pour manquant le présent d'un contenu plus lent que l'écran ; elle est
+remplacée depuis le 09/10 par des fenêtres (§9.6.1).
 
 **Première version, abandonnée le 02/09 au soir.** Elle faisait l'inverse :
 retenir le *dernier* présent de chaque intervalle et l'encoder à l'échéance,
@@ -590,6 +591,69 @@ encode 3,38 / 4,10 / 4,61 · queue 0,16 / 0,38 / 0,96 · send 0,33 / 0,70 /
 1,02 · total 4,19 / 5,63 / 6,66 ms` (moyenne / p95 / p99). La session
 précédente, avec rétention, sur le même banc : total **7,70 / 20,48 / 24,58**.
 Le p99 hôte a été divisé par presque quatre pour le même débit sur le fil.
+
+### 9.6.1 La porte porte le débit demandé : des fenêtres au lieu du recalage (09/10/2026)
+
+Le banc Android TV (B, 08/10) l'a trouvé : un flux à **50 i/s** d'un contenu à
+60 i/s, sur un écran à 144 Hz, ne portait que **40 i/s** (« 606 not carried
+(20/s) »). Le contenu présente toutes les 16,7 ms. Avec une grille de 20 ms,
+la première présentation après un tic est souvent en retard de plus d'une
+période d'écran (6,9 ms), alors qu'aucune ne manque. La porte recalait alors
+la grille sur elle, la suivante tombait trop tôt et sautait : deux images sur
+trois. Rejoué sur RE9 (77 i/s) sur l'écran virtuel à 240 Hz, réglage par
+défaut depuis le 30/09 : 48,4 i/s portées pour 60, 40,7 pour 50. La même règle
+coupait aussi un tiers des images d'une mire à 60 i/s sur un écran à 120 Hz,
+flux à 60 (N4 du même banc). Chaque image tombe un rafraîchissement trop tôt
+ou trop tard : la porte se recalait sur les tardives et sautait les précoces.
+
+**La règle (`FrameCadence::admit()`).** Chaque tic possède une fenêtre, d'un
+quart d'intervalle avant lui à un quart avant le suivant. La première
+présentation de la fenêtre est encodée à l'instant où elle arrive, aussi tard
+soit-elle dans la fenêtre, et la grille avance d'un intervalle sans changer de
+phase. Seule une fenêtre restée vide déplace la grille :
+- la présentation qui suit arrive dans l'intervalle suivant (un jeu au débit
+  du flux qui a glissé hors de sa fenêtre, un contenu un peu plus rapide avec
+  un trou plus long que d'habitude) : elle compte pour le tic manqué, et la
+  fenêtre suivante s'ouvre sur elle ;
+- deux fenêtres vides ou plus (écran fixe, boucle bloquée) : la grille repart
+  d'elle, un intervalle plus loin, comme avant.
+
+Les quatre exigences tiennent :
+- rien n'est jamais retenu ;
+- le premier changement après une pause part aussitôt, et le suivant un
+  intervalle plus tard ;
+- aucun rattrapage en rafale : un seul tic manqué est rattrapé au plus, et
+  seulement tant que le contenu continue ;
+- un jeu au débit du flux se cale : sa présentation la plus tardive tombe en
+  fin de fenêtre, les autres dedans.
+
+Le plafond (`ceiling()`, flux au débit de l'écran ou au-dessus) garde sa
+règle, à l'identique.
+
+**La piste écartée.** Avancer la grille d'un nombre entier d'intervalles
+depuis le tic manqué, sans jamais changer sa phase, rend le débit au contenu
+plus rapide. Mais un jeu au débit du flux, à un rafraîchissement près, bat
+alors contre la grille : en simulation, il descend jusqu'à 45 i/s pour 60 sur
+un écran à 120 Hz. Elle rattrape aussi après une pause : deux images coup sur
+coup.
+
+**Hors ligne.** Tests natifs (`test_frame_cadence.cpp`) : 60 i/s sous 50 à
+144 et 240 Hz, et 77 i/s sous 60 à 240 Hz, à ±1 % ; un jeu à 60 sous un flux
+à 60, sur des écrans à 120, 144, 165 et 240 Hz, au rafraîchissement près, avec
+une dérive de ±0,1 % : au plus 4 images écartées en 20 s ; la pause, la
+rafale, le plafond. L'ancienne règle échoue à 493 vérifications de ces tests,
+l'avance par intervalles entiers à 227. Rejeu des passes du plan « attente »
+(`scripts/bench/clickpath/gatesim.py`, `--before` pour l'ancienne porte) :
+
+| Scène de RE9, écran virtuel à 240 Hz | flux 60 | flux 50 | flux 30 |
+|---|---|---|---|
+| avant | 48,4 | 40,7 | 29,6 |
+| après | 59,6 | 49,7 | 29,8 |
+
+Les passes de l'outil à 240 i/s (flux 120 sur l'écran à 240 Hz) gagnent
+0,1 à 0,3 i/s ; celles où le flux est un plafond ne changent pas. Deux images
+admises à moins d'un demi-intervalle l'une de l'autre restent rares : moins
+de 3 % sur les traces de RE9 et de l'outil, aucune à moins d'un quart.
 
 ### 9.7 Écran verrouillé : la session attend, le stream reste vivant (02/09/2026)
 
