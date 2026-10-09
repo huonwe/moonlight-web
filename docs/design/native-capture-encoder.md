@@ -655,6 +655,32 @@ Les passes de l'outil à 240 i/s (flux 120 sur l'écran à 240 Hz) gagnent
 admises à moins d'un demi-intervalle l'une de l'autre restent rares : moins
 de 3 % sur les traces de RE9 et de l'outil, aucune à moins d'un quart.
 
+**Banc A/B (09/10, 10:07-10:46).** Hôte DualRTX, écran virtuel du produit à
+240 Hz rendu par la RTX, HEVC sur DDA, transport SCTP du produit ; client
+Chrome de l'UM790Pro (Windows) au câble. Bras « avant » : `build\` du 08/10,
+sans le correctif ; bras « après » : `build\` à `cb425f85`. Contenus :
+`mw-click-target --fps 60 --react frame` (un jeu à 60, 60 clics par passe) et
+la scène de RE9 (la copie propre, muette, aucun clic), qui ne rendait ici que
+~62 i/s, GPU à 98 %. I/s portées (relais, dans la scène ou la passe moins 3 s
+à chaque bout) :
+
+| Contenu, flux | avant | après |
+|---|---|---|
+| outil à 60 i/s, flux 60 | 59,3 · 59,2 | 60,0 · 60,0 |
+| outil à 60 i/s, flux 50 | 40,9 · 40,9 | 50,0 · 50,0 |
+| RE9 (~62 i/s), flux 60 | 54,6 | 59,5 |
+| RE9 (~62 i/s), flux 50 | 41,3 | 49,7 |
+
+Le critère (débit du flux à ±2 %) tient partout : −0,8 % au pire. Le rejeu
+de `gatesim.py` sur les captures de chaque passe, avec la règle de son bras,
+retrouve le compte du relais à 4 images près. L'âge de l'image ne bouge pas
+(p50 de 5,2 à 6,2 ms avant, 5,2 à 5,7 après sur l'outil ; 6,6-7,1 et 6,7-7,0
+sur RE9), le clic non plus (p50 9,6 à 12,4 ms avant, 10,0 à 11,4 après ; p90
+26 à 29 ms de part et d'autre, une passe « avant » à 43). Une passe RE9
+« après » à 50 a été jetée : le jeu a planté au chargement, écran fixe ; elle
+a été refaite. Le contenu à ~77 i/s n'a pas été reproduit au banc (RE9 à ~62
+ce jour) ; il est couvert par le rejeu et les tests.
+
 ### 9.7 Écran verrouillé : la session attend, le stream reste vivant (02/09/2026)
 
 `AcquireNextFrame` rend `DXGI_ERROR_ACCESS_LOST` pour trois raisons de durées
