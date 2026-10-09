@@ -183,22 +183,117 @@ destructeur partait aussitôt. Le `hostInMs` de la sonde lisait donc ~0 ms au
 lieu des 5 ms de SendInput. Corrigé (`afb0c445`). Le chiffre « hôte → capturée »
 du 06/10 n'en dépendait pas.
 
-## 4. Porte A1 et suite
+## 4. Banc 2 (09/10/2026) : l'écran virtuel à 240 Hz, et un vrai jeu
 
-Le poste A mesuré au drapeau est surtout un artefact du banc : ~10 ms sur 14,5
-viennent du drapeau. Avec une application rapide en tearing, il reste 6,6 à
-8,3 ms, dont 5 à 6 entre son Present et la remise par DDA. Le plein écran n'y
-change rien, puisque l'écran virtuel est toujours composé. Une application
-synchronisée ajoute ~6 ms, qui sont à sa charge et pas à celle de l'hôte.
+Même banc : DualRTX en `--dev`, la RTX encode, client UM790Pro en câble, flux
+HEVC à 120 i/s, DDA. L'écran virtuel en 1920×1080, à 120 ou 240 Hz
+(`MW_VDD_REFRESH`). `presentmon.py` lit PresentMon à côté de chaque passe.
 
-Ce reste entre le Present et la remise est de la production : c'est lui que
-visent les leviers AW2. Le constat qui les oriente est l'horloge, puisque DWM
-compose l'écran virtuel au rythme de l'écran physique à 144 Hz. Dans l'ordre :
+### 4.1 AW2.1 : l'écran virtuel à 240 Hz
 
-1. l'écran virtuel à 240 Hz, puis seul (écrans physiques éteints) : la
-   composition suit-elle l'écran le plus rapide, ou l'écran capturé ?
-2. une passe sous un vrai jeu (RE9, la copie) ;
-3. découper le Present → composition avec PresentMon.
+`mw-click-target` en fenêtre, 120 clics par case (deux passes, ordre ABBA) :
+
+| Cas | Clic p50 | Clic p90 | Clic moyen | Hôte p50 | Hôte p90 | Hôte moyen |
+|---|---|---|---|---|---|---|
+| tearing, 120 Hz | 27,5 | 33,3 | 27,5 | 6,8 | 16,3 | 8,2 |
+| tearing, 240 Hz | 27,4 | 31,6 | 26,7 | 7,7 | 11,4 | 7,6 |
+| synchronisé, 120 Hz | 32,5 | 42,7 | 34,6 | 13,5 | 21,5 | 14,0 |
+| synchronisé, 240 Hz | 29,2 | 32,5 | 29,2 | 10,1 | 16,0 | 10,7 |
+
+- **DWM compose l'écran virtuel au rythme de l'écran le plus rapide.** À
+  240 Hz, DDA voit les présentations sur une grille à 240,000 Hz. À 120 Hz,
+  elles suivaient la grille de DISPLAY9, à 144 Hz (§3.3).
+- **En tearing, rien ne change en médiane.** La composition vient plus tôt :
+  le Present précède la composition suivante de 1,0 ms au lieu de 3,4 (p50,
+  sur les images que PresentMon voit). Mais un flux à 120 i/s n'encode que
+  la première présentation de chaque tranche de 8,3 ms. À 240 Hz, une
+  composition sur deux n'est pas transportée, et le drapeau attend souvent la
+  suivante (`late=1`, `between=1`). Il ne reste qu'un gain en queue : l'hôte
+  passe de 16,3 à 11,4 ms au p90, et le clic gagne 0,8 ms en moyenne.
+- **En synchronisé, 240 Hz gagne 3,3 ms en médiane et 10 ms au p90.**
+  L'application suit l'écran virtuel et tourne à 240 i/s : c'est sa propre
+  attente qui raccourcit, pas celle de l'hôte.
+- L'encodage ne bouge pas (1,3-1,4 ms en moyenne).
+
+### 4.2 Sous un vrai jeu : RE9, la copie
+
+RE9 en fenêtre (1632×918) sur l'écran virtuel, la RTX à 98-99 % en 3D, son
+coupé. Le jeu seul, sans clic, sur ~83 s de scène :
+
+| Écran virtuel | Images neuves capturées | Écart entre présentations de DWM | Remise par DDA | Encodage moyen / p95 |
+|---|---|---|---|---|
+| 120 Hz | 78,0 par s | 13,8 ms (2 pas de la grille à 144 Hz) | 0,10 ms | 3,6 / 12,3 ms |
+| 240 Hz | 77,3 par s | 12,7 ms (le rythme du jeu) | 0,12 ms | 3,5 / 13,3 ms |
+
+- **L'écran virtuel à 240 Hz ne coûte pas d'images au jeu.** Cela répond à la
+  question du 30/09 (plan framerate-hote, décision A), restée sans mesure.
+- L'échec du 30/09, où la capture ne voyait que 3 à 7 images par seconde, ne
+  revient pas. Deux choses ont changé : la fenêtre tient désormais dans
+  l'écran virtuel (1936×1119 auparavant, sur 1920×1080), et elle est au premier
+  plan. Le banc ne dit pas laquelle des deux comptait.
+
+Le clic sous le jeu : `mw-click-target` en tearing par-dessus RE9, qui continue
+de dessiner derrière lui à 99 %, contre le même outil sans jeu (120 Hz, 60 clics
+chacun) :
+
+| | Clic p50 | Clic p90 | Hôte p50 | Present → remise p50 | Présentations de DWM | Encodage moyen / p95 |
+|---|---|---|---|---|---|---|
+| sans jeu | 26,9 | 30,8 | 6,5 | 4,7 | 142 par s | 1,6 / 3,6 ms |
+| RE9 derrière | 31,5 | 40,9 | 8,3 | 6,1 | 103 par s | 4,6 / 10,2 ms |
+
+- **Un vrai jeu coûte 4,6 ms au clic.** DWM compose moins souvent quand le
+  GPU est plein, d'où 1,8 ms de plus. L'encodage passe derrière le travail du
+  jeu sur le même GPU, d'où ~3 ms.
+- Cette part de l'encodage vient surtout du banc. La `--dev` tourne avec un
+  jeton limité et n'obtient que la classe GPU HIGH. Le worker SYSTEM du
+  produit installé obtient REALTIME, et le 27/09 (G2) REALTIME ramenait le p99
+  de l'encodage de 10-16 ms à 3 ms.
+- RE9 a planté une fois sur deux juste après son lancement à 240 Hz. Il saute
+  de lui-même vers son `TargetDisplay`, un écran physique. Rien ne
+  l'attribue à l'écran virtuel.
+
+### 4.3 Pièges du banc
+
+- **Une fenêtre d'un écran physique peut prendre les clics.** Allumé, l'écran
+  virtuel prend la place 0,0. Une fenêtre de l'Explorateur, posée en 405,114
+  sur DISPLAY5, se retrouvait alors dessus, au premier plan, et a pris les
+  60 clics d'une passe. `mw-click-target` est maintenant « toujours au premier
+  plan ». Il note aussi toute fenêtre qui le couvre sous le curseur (ligne
+  `{"covered": ...}`).
+- **PresentMon ne sert pas sur l'écran virtuel.** Il ne garde qu'une image sur
+  13 de l'outil, et perd 30 à 60 s d'un coup, même avec `--no_track_display`.
+  Quand il place une image à l'écran, il s'accorde avec DDA à 0,1 ms près.
+  Il ne reste utile que pour les modes de présentation : `Composed: Flip`
+  partout.
+- `hostpath.py` calait mal les images du client à 240 Hz : deux présentations
+  à 4 ms d'écart faussaient le décalage des horodatages. Il le choisit
+  désormais par vote.
+
+## 5. Porte AW1 et suite
+
+**Porte AW1 : le poste mesuré au drapeau est un artefact du banc, mais il
+reste de la production.** ~10 ms sur 14,5 viennent du drapeau. Pour une
+application rapide, il reste 6,5 à 8 ms d'hôte, dont 5 à 6 entre son Present
+et la remise par DDA. Le plein écran n'y change rien, puisque l'écran virtuel
+est toujours composé. Sous un vrai jeu qui sature le GPU, la composition
+ajoute ~2 ms. La synchronisation verticale du jeu est à sa charge, pas à
+celle de l'hôte.
+
+Ce que les leviers AW2 ont montré, et la suite :
+
+1. **AW2.1 (écran virtuel à 240 Hz)** : un gain pour les jeux synchronisés,
+   presque rien pour les autres, et aucun coût vu. Le passer au défaut est
+   une décision produit, avec le plan framerate-hote.
+2. **Le cadencement du flux** freine le gain : à 240 Hz, une composition sur
+   deux attend la tranche suivante. Piste : laisser encoder sans attendre une
+   présentation arrivée en cours de tranche, quand le codeur est libre. Les
+   modes `host` du plan framerate-hote s'en approchent. C'est le prochain
+   levier à mesurer, avant AW2.2.
+3. **L'encodage sous un vrai jeu** se mesure avec le produit installé
+   (REALTIME), pas avec la `--dev`.
+4. L'écran virtuel seul, sans écran physique allumé, n'a pas été essayé : il
+   faut éteindre les écrans physiques de l'hôte de banc, ce qui ne se fait
+   pas à distance.
 
 Concrètement, pour l'utilisateur : dans un jeu qui réagit vite, sans
 synchronisation verticale, l'hôte ne prend qu'environ un quart d'un clic en
@@ -206,9 +301,9 @@ LAN filaire. Le reste se partage entre l'encodage, le réseau, le décodage et
 l'affichage chez le client. Jouer en plein écran ou en fenêtre ne change rien.
 Activer la synchronisation verticale dans le jeu ajoute environ une image de
 retard, ou deux selon la façon dont le jeu lit ses entrées : c'est un réglage
-du jeu, pas de MoonlightWeb. Ce qu'il reste à gagner côté hôte se joue dans la
-composition de Windows sur l'écran virtuel (AW2). L'attente côté page relève
-du poste B.
+du jeu, pas de MoonlightWeb. Un écran virtuel à 240 Hz la réduit (3 ms de
+moins au clic, 10 ms de moins dans les pires cas) sans coûter d'images au jeu.
+Quand le jeu pousse le GPU à fond, un clic coûte ~2 ms de plus côté hôte.
 
 Pour le poste B, les hypothèses B1 se resserrent sur l'aller-retour de Chrome :
 présenter par le canevas WebGPU sans `onSubmittedWorkDone` (B2.1) devient le
