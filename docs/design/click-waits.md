@@ -473,3 +473,143 @@ ne lui coûte qu'environ une milliseconde. Quand le jeu va plus vite que l'écra
 de l'appareil qui regarde, l'« Auto » monte le flux à 240 images par seconde et
 le clic descend vers 7,5 ms. Le reste du délai se passe surtout dans le jeu et
 dans la composition de Windows, pas dans MoonlightWeb.
+
+## 8. macOS : AM0 à AM2 (09/10/2026)
+
+Hôte : mw-mac (M1 Pro, macOS 15.6.1, en Wi-Fi), édition DEV `0.3.1.ged0-dev`
+(CI de `ed05e637`, installée par Bruno). L'écran virtuel `CGVirtualDisplay`
+fait 1922×1080, à la fréquence du flux (120 Hz). La capture passe par
+ScreenCaptureKit, l'encodage par VideoToolbox en HEVC. Le client est le kiosque
+de DualRTX, sur l'écran de l'AMD, en Ethernet, dans le transport du produit.
+`clicktrace=1`, sonde corrigée (`--from-draw`), 60 clics par passe. Créneau de
+59, de 12:05 à 14:14. Lanceurs `am_run.py` et `am_series*.sh` dans le
+scratchpad de la session (`am0/`).
+
+### 8.1 L'instrumentation
+
+- La trace de l'hôte Mac (`abf45b41`) a le même CSV que celle de Windows. Elle
+  note l'appui autour du `CGEventPost`, puis, pour chaque image de
+  ScreenCaptureKit, son `displayTime` bridé et brut. S'y ajoutent sa remise
+  par le rappel de SCK (nouvelle colonne `deliveredUs`) et les images remises
+  depuis la dernière prise. La vsync de l'écran capturé vient d'un
+  CVDisplayLink. macOS ne dit rien de la composition.
+- Le drapeau Mac (`c3c25048`) note le tap et l'affichage, comme sous Windows.
+  Il accepte `MW_LATENCY_FLAG_SKIP`.
+- `mw-click-target` existe en Metal (`bd4143d1`, `ff9a0bdd`). L'appli efface
+  l'image puis y copie des rectangles, sans shader. Elle accepte `--window`,
+  `--space` (un Space à elle), `--sync`, `--level` et `--no-flag`.
+- `pass.py --host` lance l'outil sur l'hôte par launchd (`bf5c1a5d`).
+  `MW_BENCH_VIA=rendezvous` (§8.5) fait passer la page par le rendez-vous.
+
+### 8.2 Le drapeau de l'hôte n'entre pas dans la capture
+
+Chaque clic injecté est vu, et le drapeau est affiché (« hooked … shown »).
+Pourtant, sur 80 clics, la sonde n'a jamais lu le drapeau : elle lisait le
+fond, et SCK n'a livré aucune image pendant qu'il était affiché. La cause n'est
+pas le niveau de fenêtre : `mw-click-target --level shielding`, au niveau du
+drapeau (`CGShieldingWindowLevel`), est capturé normalement (20 clics sur 20).
+La fenêtre du drapeau appartient au processus serveur, et la capture tourne
+dans un processus enfant de la même appli. Cette piste n'est pas vérifiée. Le
+drapeau Mac ne mesure donc rien sur un hôte natif Mac pour l'instant.
+`mw-click-target` le remplace, comme A1 sous Windows.
+
+### 8.3 AM0 et AM1 : le jeu idéal
+
+`mw-click-target` couvre l'écran virtuel et dessine à 240 i/s. Le relais reçoit
+le clic, puis vient le `CGEventPost`, puis le `mouseDown` de l'appli (« hook »),
+le commit Metal (« raise ») et la remise par SCK de l'image qui porte le
+drapeau (« present »). Enfin le fil de capture la prend (« handoff »). Le clic
+complet se coupe en deux : clic → capture et capture → dessin, sur l'horloge du
+client. Valeurs médianes en ms :
+
+| Passe | Clic | Clic → capture | Capture → dessin | hook | raise | present | handoff | Hôte |
+|---|---|---|---|---|---|---|---|---|
+| Plein écran r1 | 35,7 | 15,0 | 20,9 | 2,8 | 0,9 | 9,3 | 3,2 | 16,7 |
+| Plein écran r2 | 35,9 | 16,0 | 20,4 | 2,3 | 0,5 | 10,2 | 3,4 | 16,8 |
+| Fenêtre (90 %) | 35,2 | 15,7 | 19,8 | 2,1 | 1,0 | 8,7 | 3,4 | 16,1 |
+| Space à elle | 37,7 | 17,6 | 19,8 | 3,2 | 0,7 | 9,3 | 3,0 | 18,1 |
+| Synchronisé (`--sync 1`) | 51,5 | 31,5 | 20,3 | 8,1 | 6,1 | 13,4 | 3,2 | 31,9 |
+
+- **Un clic vaut ~36 ms sur un hôte Mac, contre ~11,5 ms sous Windows en
+  filaire (§6.1).** L'hôte en prend ~16-17. Le reste, ~20 ms entre la capture
+  et le dessin, comprend l'encodage, le Wi-Fi du Mac et le décodage.
+- **L'entrée met 2-3 ms à atteindre l'appli** : 1,9 ms entre l'horodatage de
+  l'événement et son `mouseDown`. Sous Windows, il fallait 1 à 2 ms.
+- **La composition puis la remise par SCK prennent 9-10 ms à 120 Hz**, plus
+  d'une période (8,3 ms). Deux fois sur trois, SCK remet l'image *avant* son
+  `displayTime`, de 1,3 ms en médiane : il la livre pour la vsync à venir.
+- **Le fil de capture prend l'image 3 ms après sa remise.** Sous Windows, il
+  fallait 0,1 ms. Ce fil encode lui-même, et VideoToolbox prend 9,5-10 ms par
+  image en 1922×1080 à 120 i/s (p90 14-15). C'est plus que l'intervalle, et
+  11 % des images de SCK sont remplacées avant d'être prises (837 sur 7 341).
+  L'encodeur est déjà au plus rapide (pleine vitesse, vitesse avant qualité).
+- **Plein écran, fenêtre et Space à elle donnent le même clic.** Rien ne passe
+  à côté de la composition, comme avec IddCx sous Windows. Synchronisé, l'appli
+  attend son image et le clic prend ~16 ms de plus.
+- Metal ne donne aucune heure de présentation sur l'écran virtuel :
+  `presentedTime` y vaut toujours 0. L'heure de SCK en tient lieu.
+- **Porte AM1 : production.** Tout le poste est celui d'une vraie appli :
+  remise de l'entrée, composition, remise par SCK, attente de l'encodeur. La
+  passe sous un jeu du Mac n'a pas été faite : les jeux de Léo demandent
+  l'accord de Bruno.
+
+### 8.4 AM2 : les leviers
+
+Passes alternées ABBA, 2×60 clics par bras, `mw-click-target` en plein écran.
+
+| Levier | Clic p50 | Clic → capture p50 | Hôte (present) |
+|---|---|---|---|
+| Écran virtuel à 120 Hz (le produit) | 36,8 | 16,0 | 17,8-19,1 (10,3-10,5) |
+| Écran virtuel à 240 Hz (`MW_VDD_REFRESH=240`) | 35,6 | 14,1 | 16,4-17,4 (7,5-9,3) |
+| SCK par défaut | 37,2 | 15,7 | |
+| `sckinterval=0` | 36,0 | 15,5 | |
+| `sckdepth=2` (30 clics) | 39,8 | 16,7 | |
+
+- **AM2.1 : l'écran virtuel à 240 Hz gagne ~2 ms entre le clic et la capture**
+  (~1,2 sur le clic). Le flux reste à 120 i/s : la porte de cadence en prend
+  une présentation sur deux. SCK livre alors deux fois plus d'images (12 995
+  contre 7 341 en 72 s), et la moitié sont remplacées sans être prises.
+  `CGVirtualDisplay` accepte bien 240 Hz. Le produit garde aujourd'hui sur Mac
+  la fréquence du flux (`kFasterThanStream`) : passer à 240 Hz est une décision
+  de Bruno, qui coûte du travail de capture.
+- **AM2.2 : rien à gagner sur la file de SCK.** Sans intervalle minimal, l'écart
+  reste dans le bruit. Avec une seule surface, la capture se fige : 2 images en
+  84 s, parce que le moteur en garde une. Avec deux, c'est pire.
+- **AM2.3 : la capture prend déjà la plus récente.** L'attente de 3 ms est celle
+  du fil qui encode, pas celle d'une file. Le seul levier qui reste côté hôte
+  est de séparer la capture de l'encodage, ou d'encoder plus vite.
+
+### 8.5 La page de l'hôte, ouverte à son adresse
+
+Depuis le Chrome de DualRTX, la page de la DEV Mac à `https://192.168.1.34:48443/`
+reste vide une fois sur deux, et plus souvent encore au fil du banc. Une
+connexion TCP ne s'ouvre pas : `ERR_CONNECTION_TIMED_OUT` sur `app.js` ou une
+feuille de style, ou un `fetch` des traductions qui reste en attente. Or un
+module manquant arrête toute l'appli, sans message. `curl` en rafale (3×128
+fichiers, 6 en parallèle) n'échoue jamais, et le TLS post-quantique n'y est pour
+rien. Le serveur répond `Connection: close` à chaque fichier : chaque fichier
+coûte donc une connexion TLS, environ 128 par chargement. En accès direct, aucun
+service worker ne garde l'interface ; le cache `mw-shell` n'existe que par le
+rendez-vous. Par le rendez-vous, la page vient du cache du bootstrap et ses
+requêtes passent par le tunnel : elle s'ouvre du premier coup. Le banc est
+passé par là pour toutes les passes après 13:40. Le défaut est versé à la liste
+du plan natif (§9).
+
+**Bilan de macOS.** Sur un Mac en Wi-Fi, un clic vaut ~36 ms. L'hôte en garde
+16-17 :
+- 2-3 ms pour remettre l'entrée à l'appli ;
+- 9-10 ms de composition et de remise par ScreenCaptureKit à 120 Hz ;
+- 3 ms d'attente du fil de capture, occupé par l'encodeur.
+
+L'encodeur prend ensuite 10 ms par image. Il ne reste qu'un petit levier sur la
+capture : l'écran virtuel à 240 Hz, environ −2 ms. Le gros du coût est dans
+l'encodeur VideoToolbox et dans le Wi-Fi.
+
+Concrètement, pour l'utilisateur : quand on joue sur un Mac depuis un autre
+appareil, un clic revient à l'écran en ~36 ms, trois fois plus que depuis un PC
+Windows relié en filaire. Le Mac compose l'image et la remet à la capture avec
+une image de retard. Son encodeur vidéo prend 10 ms par image, et le Wi-Fi
+ajoute son propre délai. Ni le plein écran ni la file de capture n'y changent
+rien. Un écran virtuel à 240 Hz ferait gagner environ 2 ms. Enfin, la page de
+l'hôte ouverte à son adresse en réseau local peut rester vide : un
+rechargement, ou le lien du rendez-vous, la fait venir.

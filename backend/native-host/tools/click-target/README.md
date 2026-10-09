@@ -18,8 +18,22 @@ parks the pointer on.
   but cleared rectangles — the background, a grey bar that moves along the
   bottom so every frame is a new picture, and the flag's three bands. No
   shader, no pipeline state.
-- Linux (Vulkan on Wayland) and macOS (Metal) are the plan's next steps, with
-  the same options and the same log.
+- **macOS**: Metal into a CAMetalLayer, two drawables, the display sync off
+  with `--sync 0`. A render pass that only clears, then the bar and the bands
+  copied from buffers filled once with each colour: no shader either. The click
+  is the view's `mouseDown` (`downUs`; `eventUs` is the event's own stamp), the
+  picture on the screen Metal's `presentedTime` of the first drawable shown at
+  or after it (`exact` or `later`). On a `CGVirtualDisplay` Metal reports no
+  presentation at all: `displayedUs` stays null there (09/10/2026), and the
+  capture's display time is the one to read. `--space` goes full screen in a
+  Space of its own; `--level screensaver|normal|shielding` sets the window's
+  level (screensaver by default, normal with `--no-flag`). Started by
+  `pass.py --host mw-mac` through launchd, on the screen named "Virtual
+  Display".
+- Linux (Vulkan on Wayland) is the plan's next step, with the same options and
+  the same log.
+- `--no-flag`, everywhere: a window that only takes the clicks, under the
+  host's own flag, so that the bench's injected clicks land on it.
 
 ## Options
 
@@ -63,7 +77,10 @@ API does not say: run PresentMon beside it for that.
 - The host's flag must not cover it: keep `latency_flag_enabled` on (the probe
   needs it), but tell the flag to stay off that screen with
   `MW_LATENCY_FLAG_SKIP=\\.\DISPLAYn` in the server's environment, or `*` for
-  every screen (the virtual display's name changes each time it is made).
+  every screen (the virtual display's name changes each time it is made). On
+  macOS the same variable takes `*`, a display id or a screen's name; the Mac
+  host's own flag is not in ScreenCaptureKit's picture anyway (09/10/2026,
+  `docs/design/click-waits.md` §8.2), so this tool is the Mac's marker.
 - The host's pointer must be over the window: an injected click goes to the
   window under it, and the probe never moves it. The tool puts it there at
   start and brings it back every 250 ms if something took it away (a log
