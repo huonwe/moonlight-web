@@ -234,7 +234,9 @@ private:
     uint64_t m_Frames = 0;
 };
 
-std::string clickJson(const PendingClick& c, int64_t displayedUs, const char* how)
+/// @p shownFrame the frame that reached the screen (0: none known).
+std::string clickJson(const PendingClick& c, int64_t displayedUs, const char* how,
+                      uint64_t shownFrame = 0)
 {
     return "{\"click\":" + std::to_string(c.id) + ",\"downUs\":" + std::to_string(c.downUs) +
            ",\"eventUs\":" + std::to_string(c.eventUs) +
@@ -243,7 +245,7 @@ std::string clickJson(const PendingClick& c, int64_t displayedUs, const char* ho
            ",\"presentUs\":" + std::to_string(c.presentUs) +
            ",\"presentId\":" + std::to_string(c.frame) +
            ",\"displayedUs\":" + (displayedUs ? std::to_string(displayedUs) : std::string("null")) +
-           ",\"displayed\":\"" + how + "\"}";
+           ",\"shownId\":" + std::to_string(shownFrame) + ",\"displayed\":\"" + how + "\"}";
 }
 
 /// Everything the window, the timer and the presented handlers share. The
@@ -372,16 +374,17 @@ void drawNow(int64_t now)
     const bool ok = s->renderer.frame(
         up ? &s->flag : nullptr, callUs, doneUs, presentId,
         ^(uint64_t frame, double presentedTime) {
-            // A Metal thread: the click this frame carried, now known shown.
-            const int64_t shownUs = presentedTime > 0 ? mediaToSteadyUs(presentedTime) : 0;
+            // A Metal thread. A frame the window server never showed (a newer
+            // one took its refresh, as most do at 240 fps on a 120 Hz screen)
+            // says nothing yet: the click waits for the first frame shown at or
+            // after its own, which still carries the flag while it is up.
+            if (presentedTime <= 0) return;
+            const int64_t shownUs = mediaToSteadyUs(presentedTime);
             std::lock_guard<std::mutex> lock(s->mutex);
             while (!s->pending.empty() && s->pending.front().presented &&
                    s->pending.front().frame <= frame) {
                 const PendingClick& c = s->pending.front();
-                if (c.frame == frame)
-                    s->log->line(clickJson(c, shownUs, shownUs ? "exact" : "dropped"));
-                else
-                    s->log->line(clickJson(c, 0, "passed"));
+                s->log->line(clickJson(c, shownUs, c.frame == frame ? "exact" : "later", frame));
                 s->pending.pop_front();
             }
         });
@@ -574,7 +577,13 @@ int run(const Options& o, Log& log)
                                                       screen:screen];
         // Above every ordinary window: a window that lands on this screen
         // would otherwise take the clicks (09/10 on Windows: 60 of them).
-        [window setLevel:NSScreenSaverWindowLevel];
+        // With --no-flag it only takes the clicks, under the host's flag: an
+        // ordinary window.
+        NSInteger level = o.drawFlag ? NSScreenSaverWindowLevel : NSNormalWindowLevel;
+        if (o.level == "screensaver") level = NSScreenSaverWindowLevel;
+        if (o.level == "normal") level = NSNormalWindowLevel;
+        if (o.level == "shielding") level = CGShieldingWindowLevel();
+        [window setLevel:level];
         [window setOpaque:YES];
         [window setHasShadow:NO];
         [window setReleasedWhenClosed:NO];

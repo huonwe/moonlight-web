@@ -256,6 +256,22 @@ def band_seen(d, secs=2.0):
     return (s.get("ages") or 0) > 0 or not (s.get("invalid") or {}).get("block")
 
 
+
+def library(d, access, tries=6):
+    """The host cards on the page, which is loaded again when they do not come.
+    One module lost on the way stops the whole app before it asks for anything:
+    a host on Wi-Fi let some of the connections of a page load time out (mw-mac,
+    09/10/2026: ERR_CONNECTION_TIMED_OUT, on app.js itself in two loads of
+    three; each file is a connection of its own, Connection: close, and a page
+    reached at the host's address has no service worker to load from)."""
+    for attempt in range(tries):
+        if d.wait_library(access.get("name", "bench"), access.get("pin", ""),
+                          tries=25 if attempt == 0 else 8):
+            return True
+        print("  no host card yet: the page loaded again", flush=True)
+        d.navigate(access["lan"])
+    return False
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fps", type=int, default=0, help="stream_fps; 0 = Auto")
@@ -341,7 +357,7 @@ def main():
         d.eval("(async () => { await caches.delete('mw-shell'); for (const r of await "
                "navigator.serviceWorker.getRegistrations()) await r.unregister(); return 1; })()")
         d.navigate(access["lan"])
-        d.wait_library(access.get("name", "bench"), access.get("pin", ""), tries=25)
+        library(d, access)
         # The bench profile keeps its localStorage from one pass to the next:
         # a switch not asked for this time is taken away.
         d.eval("localStorage.removeItem('mw_decodequeue')")
@@ -369,7 +385,7 @@ def main():
         if a.bitrate > 0:
             settings.update({"stream_bitrate_auto": False, "stream_bitrate": a.bitrate})
         d.apply_settings(settings)
-        d.wait_library(access.get("name", "bench"), access.get("pin", ""), tries=25)
+        library(d, access)
         os.environ["MW_BENCH_DISPLAY"] = a.display_index
         card, app = d.pick_tile(a.target)
         print("tile", card.get("name"), "/", app.get("name"), flush=True)

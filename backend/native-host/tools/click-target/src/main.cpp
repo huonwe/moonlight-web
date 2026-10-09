@@ -34,6 +34,7 @@ const char* kUsage =
     "  --on-click           draw only when the flag changes (default: continuously)\n"
     "  --no-flag            never draw the flag: a window that only takes the clicks,\n"
     "                       under the host's own flag (with --on-click: one picture)\n"
+    "  --level <name>       macOS: the window's level, screensaver, normal or shielding\n"
     "  --fps <n>            continuous frames a second at most, 0 none (default 240)\n"
     "  --react frame        a click waits for the next frame due (default: at once)\n"
     "  --input-first        read the input before waiting for the swap chain, as a\n"
@@ -80,6 +81,9 @@ int main(int argc, char** argv)
             o.continuous = false;
         } else if (a == "--no-flag") {
             o.drawFlag = false;
+        } else if (a == "--level" && next) {
+            o.level = argv[++i];
+            ok = o.level == "screensaver" || o.level == "normal" || o.level == "shielding";
         } else if (a == "--fps" && next) {
             ok = takeInt(argv[++i], o.fps, 0, 1000);
         } else if (a == "--react" && next) {

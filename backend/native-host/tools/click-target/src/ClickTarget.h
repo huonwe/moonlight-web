@@ -79,6 +79,9 @@ struct Options
     /// only takes the clicks, under the host's own flag, so the bench's
     /// injected clicks land on it rather than in someone's application.
     bool drawFlag = true;
+    /// macOS: the window's level, "screensaver" (the default; "normal" with
+    /// --no-flag) or "shielding", the host flag's own (LatencyFlagMac.mm).
+    std::string level;
 };
 
 /// A microsecond count on the OS's monotonic clock — on Windows the
