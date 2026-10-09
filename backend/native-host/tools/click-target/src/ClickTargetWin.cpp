@@ -438,8 +438,11 @@ int run(const Options& o, Log& log)
     RegisterClassW(&wc);
     State state;
     g_State = &state;
-    state.hwnd = CreateWindowExW(0, kClass, L"MoonlightWeb click target", WS_POPUP | WS_VISIBLE,
-                                 mr.left, mr.top, ww, wh, nullptr, nullptr, wc.hInstance, nullptr);
+    // Topmost: a window someone opens on the screen it took would otherwise
+    // come over it and take the clicks (09/10: an Explorer window, 60 clicks).
+    state.hwnd =
+        CreateWindowExW(WS_EX_TOPMOST, kClass, L"MoonlightWeb click target", WS_POPUP | WS_VISIBLE,
+                        mr.left, mr.top, ww, wh, nullptr, nullptr, wc.hInstance, nullptr);
     if (!state.hwnd) {
         std::fprintf(stderr, "mw-click-target: no window (%lu)\n", GetLastError());
         return 1;
@@ -452,14 +455,43 @@ int run(const Options& o, Log& log)
     // ran with every click landing on another screen: 60 sent, none received.
     RECT windowRect = {};
     GetWindowRect(state.hwnd, &windowRect);
+    // And whose window is under it: another one there takes the clicks. Said
+    // once each time it changes, and this one raised again.
+    HWND coveredBy = nullptr;
     auto keepCursor = [&](const char* why) {
         POINT p = {};
-        if (GetCursorPos(&p) && PtInRect(&windowRect, p)) return;
-        SetCursorPos((windowRect.left + windowRect.right) / 2,
-                     (windowRect.top + windowRect.bottom) / 2);
-        log.line("{\"cursor\":\"" + std::string(why) +
-                 "\",\"at\":" + std::to_string(steadyNowUs()) + ",\"was\":\"" +
-                 std::to_string(p.x) + "," + std::to_string(p.y) + "\"}");
+        if (!GetCursorPos(&p) || !PtInRect(&windowRect, p)) {
+            log.line("{\"cursor\":\"" + std::string(why) +
+                     "\",\"at\":" + std::to_string(steadyNowUs()) + ",\"was\":\"" +
+                     std::to_string(p.x) + "," + std::to_string(p.y) + "\"}");
+            p = {(windowRect.left + windowRect.right) / 2,
+                 (windowRect.top + windowRect.bottom) / 2};
+            SetCursorPos(p.x, p.y);
+        }
+        HWND under = GetAncestor(WindowFromPoint(p), GA_ROOT);
+        if (under == state.hwnd) under = nullptr;
+        if (under == coveredBy) return;
+        coveredBy = under;
+        std::string who = "none";
+        if (under) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(under, &pid);
+            wchar_t path[MAX_PATH] = L"";
+            DWORD n = MAX_PATH;
+            HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (proc) {
+                QueryFullProcessImageNameW(proc, 0, path, &n);
+                CloseHandle(proc);
+            }
+            const wchar_t* exe = wcsrchr(path, L'\\');
+            wchar_t cls[128] = L"";
+            GetClassNameW(under, cls, 128);
+            who = narrow(exe ? exe + 1 : path) + " " + narrow(cls);
+            SetWindowPos(state.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        log.line("{\"covered\":\"" + jsonText(who) + "\",\"at\":" + std::to_string(steadyNowUs()) +
+                 "}");
     };
     keepCursor("placed");
 

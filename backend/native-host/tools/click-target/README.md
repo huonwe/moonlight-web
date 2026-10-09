@@ -68,6 +68,12 @@ API does not say: run PresentMon beside it for that.
   window under it, and the probe never moves it. The tool puts it there at
   start and brings it back every 250 ms if something took it away (a log
   line `{"cursor": "placed" | "brought back", "was": "x,y"}` each time).
+- And nothing may sit over it there. The window is topmost: a window of a
+  physical screen can land where the virtual display now is (on 09/10 an
+  Explorer window took a pass's 60 clicks). Every 250 ms the tool also looks
+  at the window under the pointer; when it is another one, it logs
+  `{"covered": "<exe> <class>"}` and raises itself again, and logs
+  `{"covered": "none"}` once it is on top.
 - `scripts/bench/clickpath/hostpath.py <tag> --target <log>` splits the click
   with it (see that folder's README).
 
