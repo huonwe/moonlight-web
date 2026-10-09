@@ -11963,7 +11963,7 @@ export class StreamView {
         // decoded frame with this submit by it.
         const ts = (this._ultraTs = (this._ultraTs || 0) + 1);
         this._trackChunkSubmit(ts, backendTs, {
-            arrived: arrivalAbs,
+            arrived: arrivalAbs > 0 ? arrivalAbs - performance.timeOrigin : 0,
             bytes: data.length,
             key: true,
             hostTs: backendTs,

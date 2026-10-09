@@ -272,6 +272,28 @@ def library(d, access, tries=6):
         d.navigate(access["lan"])
     return False
 
+
+def ultra_player(d, tag):
+    """POC Ultra U4: the page's PyroWave player, where a frame's decode time
+    goes (packets parsed, work recorded, GPU done, VideoFrame made); None
+    without one. With localStorage mw_ultra_trace=1 (plan « attente » B0),
+    every frame's timeline too, beside the pass as <tag>.ultratrace.json, for
+    scripts/bench/clickpath/gpuwait.py."""
+    raw = d.eval("globalThis.__mwUltraPlayer ? JSON.stringify(__mwUltraPlayer.summary()) : null")
+    if not raw:
+        return None
+    player = json.loads(raw)
+    print("  pyrowave p50 ms: " + ", ".join(
+        "%s %s" % (k, (player.get(k) or {}).get("p50"))
+        for k in ("wait", "parse", "record", "done", "frame", "gpuDecode", "gpuPresent")), flush=True)
+    if player.get("traced"):
+        trace = d.eval("JSON.stringify(__mwUltraPlayer.trace)")
+        with open(os.path.join(age.OUT, tag + ".ultratrace.json"), "w") as f:
+            f.write(trace)
+        print("  pyrowave trace: %s records" % player["traced"], flush=True)
+    return player
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fps", type=int, default=0, help="stream_fps; 0 = Auto")
@@ -461,10 +483,12 @@ def main():
             elif target:
                 target.terminate()
             stats = d.stats()
+            player = ultra_player(d, a.tag)
             with open(os.path.join(age.OUT, a.tag + ".json"), "w") as f:
                 json.dump({"tag": a.tag, "overlay": stats, "args": vars(a),
                            "uplink": uplink, "clicks": clicks,
                            "frameLog": json.loads(frame_log) if frame_log else None,
+                           "ultraPlayer": player,
                            "env": {k: os.environ.get(k, "")
                                    for k in ("MW_NATIVE_TUNING", "MW_VDD_REFRESH")}}, f)
             print("  held %d s; %s" % (a.hold, ((stats or {}).get("rows") or {}).get(
@@ -571,22 +595,9 @@ def main():
             data["rtp"] = json.loads(rtp)
             print("  rtp: %(lost)s frames lost, %(nacked)s chunks NACKed, %(whole)s whole frames "
                   "asked, %(reasked)s asked again" % data["rtp"], flush=True)
-        # POC Ultra U4: the page's PyroWave player, where a frame's decode
-        # time goes (packets parsed, work recorded, GPU done, VideoFrame made).
-        player = d.eval("globalThis.__mwUltraPlayer ? JSON.stringify(__mwUltraPlayer.summary()) : null")
+        player = ultra_player(d, a.tag)
         if player:
-            data["ultraPlayer"] = json.loads(player)
-            print("  pyrowave p50 ms: " + ", ".join(
-                "%s %s" % (k, (data["ultraPlayer"].get(k) or {}).get("p50"))
-                for k in ("wait", "parse", "record", "done", "frame", "gpuDecode", "gpuPresent")),
-                flush=True)
-            # Plan "attente" B0 (localStorage mw_ultra_trace=1): every frame's
-            # timeline, beside the pass, for scripts/bench/clickpath/gpuwait.py.
-            if data["ultraPlayer"].get("traced"):
-                trace = d.eval("JSON.stringify(__mwUltraPlayer.trace)")
-                with open(os.path.join(age.OUT, a.tag + ".ultratrace.json"), "w") as f:
-                    f.write(trace)
-                print("  pyrowave trace: %s records" % data["ultraPlayer"]["traced"], flush=True)
+            data["ultraPlayer"] = player
         if load_seen:
             data["load"] = load_seen
             print("  load: " + " | ".join("%s %s fps, GPU %s ms, level %s%s" % (
