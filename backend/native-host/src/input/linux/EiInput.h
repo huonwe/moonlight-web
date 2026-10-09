@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "../../core/ClickTrace.h"
 #include "../IInputSink.h"
 #include "XkbTextMap.h"
 
@@ -79,6 +80,9 @@ public:
     bool start(std::string& error) override;
     void stop() override;
     void inject(const InputEvent& event) override;
+    /// The bench's click trace (clicktrace=1): each press timed around its
+    /// libei button and frame. Set before start(); null, the product.
+    void setClickTrace(ClickTrace* trace) { m_ClickTrace = trace; }
 
 private:
     struct Api;
@@ -118,6 +122,8 @@ private:
 
     XkbTextMap m_TextMap;
     bool m_TextMapTried = false;
+
+    ClickTrace* m_ClickTrace = nullptr;
 };
 
 } // namespace mw::native::input

@@ -34,6 +34,7 @@
 #include "vulkan/VulkanDevice.h"
 #endif
 #include "../../core/CadenceAlign.h"
+#include "../../core/ClickTrace.h"
 #include "../../core/CursorPositionGate.h"
 #include "../../core/FrameCadence.h"
 #include "../../core/LinuxRouteChoice.h"
@@ -124,6 +125,18 @@ struct FrameStamps
 FrameStamps resendStamps(int64_t nowUs)
 {
     return FrameStamps{nowUs, nowUs, nowUs, nowUs, true};
+}
+
+const char* acquireStatusName(capture::AcquireStatus status)
+{
+    switch (status) {
+    case capture::AcquireStatus::Ok: return "ok";
+    case capture::AcquireStatus::Timeout: return "timeout";
+    case capture::AcquireStatus::PointerOnly: return "pointer";
+    case capture::AcquireStatus::Lost: return "lost";
+    case capture::AcquireStatus::Failed: return "failed";
+    }
+    return "";
 }
 
 std::string hzString(int milliHz)
@@ -682,13 +695,21 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_InputMutex);
             std::unique_ptr<input::IInputSink> sink;
+            ClickTrace* trace = m_Config.tuning.clickTrace ? &m_ClickTrace : nullptr;
 #if defined(MW_NATIVE_LINUX_PORTAL)
-            if (m_OnGamescope)
-                sink = std::make_unique<input::EiInput>(
+            if (m_OnGamescope) {
+                auto ei = std::make_unique<input::EiInput>(
                     capture::gamescopeSocketPath(m_Gamescope.endpoints.eisSocket),
                     m_Gamescope.width, m_Gamescope.height);
+                ei->setClickTrace(trace);
+                sink = std::move(ei);
+            }
 #endif
-            if (!sink) sink = std::make_unique<input::UinputInput>();
+            if (!sink) {
+                auto uinput = std::make_unique<input::UinputInput>();
+                uinput->setClickTrace(trace);
+                sink = std::move(uinput);
+            }
             std::string inputError;
             if (sink->start(inputError)) {
                 applyInputRects(*sink, inputRects);
@@ -859,6 +880,39 @@ public:
             if (m_Input) m_Input->inject(event);
             break;
         }
+    }
+
+    std::string clickTraceCsv() const override
+    {
+        if (!m_Config.tuning.clickTrace) return {};
+        if (m_ClickTrace.dropped() > 0)
+            log::warning("[native] click trace: full, " + std::to_string(m_ClickTrace.dropped()) +
+                         " rows past the first " + std::to_string(ClickTrace::kMaxRows) +
+                         " not kept");
+        return m_ClickTrace.csv();
+    }
+
+    /// One wake-up of the capture into the click trace (clicktrace=1): what it
+    /// brought, the route's own stamps on it — KMS: the vblank it was read
+    /// after and its sequence; the portal: the PipeWire buffer header's pts and
+    /// seq, and when its process callback handed the buffer over. Linux has no
+    /// compositor timing to read beside it. Capture thread only.
+    void traceCapture(capture::AcquireStatus status, const capture::KmsFrame& frame,
+                      int64_t startUs, int64_t doneUs)
+    {
+        ClickTrace::Row row;
+        row.kind = ClickTrace::Kind::Capture;
+        row.us = doneUs;
+        row.startUs = startUs;
+        row.status = acquireStatusName(status);
+        if (status == capture::AcquireStatus::Ok) {
+            row.presentUs = frame.presentUs;
+            row.presentRawUs = frame.presentRawUs;
+            row.accumulated = frame.accumulated > 0 ? frame.accumulated : -1;
+            row.composedFrames = frame.sequence;
+            row.deliveredUs = frame.capturedUs;
+        }
+        m_ClickTrace.add(row);
     }
 
     void setCompositeCursor(bool composite, int cursorFramePx) override
@@ -1482,6 +1536,7 @@ private:
             return m_DmabufOffer;
         }
         offer.renderNode = node;
+        offer.evenWithTrails = m_Config.tuning.portalDmabuf == EncoderTuning::Choice::On;
         log::info("[native] the portal is offered DMA-BUF on " + node + " (" + counts +
                   " modifiers for XR24, AR24, XB24, AB24), then shared memory");
         m_DmabufOffer = std::move(offer);
@@ -2471,9 +2526,12 @@ private:
             }
 
             capture::KmsFrame fresh;
+            const int64_t acquireStartUs = steadyNowUs();
             const capture::AcquireStatus status = portalModeChanged
                                                       ? capture::AcquireStatus::Lost
                                                       : m_Capture->acquire(timeoutMs, fresh);
+            if (m_Config.tuning.clickTrace && !portalModeChanged)
+                traceCapture(status, fresh, acquireStartUs, steadyNowUs());
 
             if (status != capture::AcquireStatus::Timeout && boosted) {
                 boosted = false;
@@ -2954,6 +3012,9 @@ private:
     /// (X11Damage): shared with the capture, which asks it at each vblank.
     std::shared_ptr<capture::X11Damage> m_Damage;
 
+    /// The bench's click trace (EncoderTuning::clickTrace). Capture thread,
+    /// and the input's. Ahead of the sinks, which write to it.
+    ClickTrace m_ClickTrace;
     std::mutex m_InputMutex;
     /// uinput on the desktop; libei into gamescope (EiInput.h), whose app no
     /// uinput device reaches.

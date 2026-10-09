@@ -92,6 +92,15 @@ struct KmsFrame
     /// LastPresentTime, not the moment we noticed.
     int64_t presentUs = 0;
     int64_t capturedUs = 0;
+
+    /// For the click trace (core/ClickTrace.h): the compositor's or the
+    /// kernel's own stamp before presentUs's clamp to "now" (0 when it gave
+    /// none), its sequence number (the vblank's, or the PipeWire buffer
+    /// header's seq; -1 when none), and how many frames the route handed over
+    /// since the last one taken, this one included (0 when it cannot tell).
+    int64_t presentRawUs = 0;
+    int64_t sequence = -1;
+    int accumulated = 0;
 };
 
 /// What one acquire() attempt produced.

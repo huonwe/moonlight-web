@@ -373,7 +373,9 @@ struct EncoderTuning
     /// DMA-BUF asked of the ScreenCast portal (PortalCapture::offerDmabuf,
     /// C13.3 bis). Off asks for shared memory only, what a compositor without
     /// DMA-BUF hands over — measured on one that has it (C13.10). The engine's
-    /// own is on.
+    /// own is on, except on GNOME's virtual monitor before GNOME 48, whose
+    /// DMA-BUF frames keep trails of the pointer; On asks for it there too,
+    /// trails and all, to measure the shared memory's price (plan « attente »).
     Choice portalDmabuf = Choice::Default;
     /// GNOME's own screen cast for the virtual display (MutterScreenCast.h,
     /// plan Idées Punktfunk C2). Off makes it through the portal, as before

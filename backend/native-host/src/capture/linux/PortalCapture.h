@@ -113,6 +113,10 @@ public:
     {
         std::string renderNode;
         std::vector<std::pair<uint32_t, std::vector<uint64_t>>> modifiers;
+        /// The bench's portaldmabuf=1: offered even where the frames keep
+        /// trails of the pointer (GNOME's virtual monitor before GNOME 48), to
+        /// measure what the shared memory taken there instead costs.
+        bool evenWithTrails = false;
     };
     /// Set before start(). Without an offer the portal is asked for shared
     /// memory only, as this route always did.

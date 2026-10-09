@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "../../core/ClickTrace.h"
 #include "../IInputSink.h"
 #include "../RecentreDetector.h"
 #include "X11Pointer.h"
@@ -70,6 +71,9 @@ public:
     void inject(const InputEvent& event) override;
     void setDisplayRect(int left, int top, int right, int bottom) override;
     void setDesktopRect(int left, int top, int right, int bottom) override;
+    /// The bench's click trace (clicktrace=1): each press timed around its
+    /// write to the uinput device. Set before start(); null, the product.
+    void setClickTrace(ClickTrace* trace) { m_ClickTrace = trace; }
 
 private:
     /// Create one uinput device. @p absolute selects the pointer that reports
@@ -165,6 +169,8 @@ private:
     /// worth an info line; the rest are not, and a display rectangle that does
     /// not match the X root would otherwise log on every single movement.
     bool m_WarpLogged = false;
+
+    ClickTrace* m_ClickTrace = nullptr;
 };
 
 } // namespace mw::native::input

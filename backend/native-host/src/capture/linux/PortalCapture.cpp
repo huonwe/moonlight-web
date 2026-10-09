@@ -118,6 +118,8 @@ struct PortalCapture::Impl
     pw_buffer* held = nullptr;
     KmsFrame frame{};
     bool frameFresh = false;
+    /// Buffers handed over since the consumer last took one (click trace).
+    int folded = 0;
     bool isDmabuf = false;
     /// A buffer has arrived since start(): what dmabuf() says is the
     /// buffers' own word from then on, not the format's.
@@ -340,6 +342,7 @@ struct PortalCapture::Impl
             pw_stream_queue_buffer(self->stream, self->held);
             self->held = nullptr;
         }
+        self->folded = self->frameFresh ? self->folded + 1 : 1;
 
         self->readCursor(b);
 
@@ -372,6 +375,8 @@ struct PortalCapture::Impl
             spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(spa_meta_header)));
         f.presentUs = header && header->pts > 0 ? header->pts / 1000 : self->nowUs();
         f.capturedUs = self->nowUs();
+        f.presentRawUs = header && header->pts > 0 ? header->pts / 1000 : 0;
+        f.sequence = header ? static_cast<int64_t>(header->seq) : -1;
 
         self->held = b;
         self->frameFresh = true;
@@ -584,10 +589,14 @@ bool PortalCapture::start(std::string& error)
     // memory frames are painted whole each time, pointer included, and show
     // neither (probe: 0 trails over 90 moves; a pointer in every picture).
     // The price is a copy through system memory, on that route only.
-    const bool offerDmabuf = !d->offer.renderNode.empty() && !d->embedCursor;
+    const bool offerDmabuf =
+        !d->offer.renderNode.empty() && (!d->embedCursor || d->offer.evenWithTrails);
     if (!d->offer.renderNode.empty() && !offerDmabuf)
         log::info("[native] GNOME's virtual monitor before GNOME 48: shared memory only — its "
                   "DMA-BUF frames keep trails of the pointer");
+    if (d->embedCursor && d->offer.evenWithTrails && offerDmabuf)
+        log::info("[native] GNOME's virtual monitor before GNOME 48: DMA-BUF all the same, "
+                  "trails of the pointer and all (bench: portaldmabuf=1)");
     auto addFormats = [&](bool pinMax) {
         if (offerDmabuf) {
             static const uint32_t kFormats[] = {SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx,
@@ -725,6 +734,8 @@ AcquireStatus PortalCapture::acquire(int timeoutMs, KmsFrame& frame)
     d->frameFresh = false;
     d->cursorFresh = false;
     frame = d->frame;
+    frame.accumulated = d->folded;
+    d->folded = 0;
     return AcquireStatus::Ok;
 }
 

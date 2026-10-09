@@ -766,6 +766,7 @@ AcquireStatus KmsCapture::acquire(int timeoutMs, KmsFrame& frame)
 
     for (;;) {
         int64_t vblankUs = 0;
+        int64_t vblankSeq = -1;
         if (!m_Polled) {
             // Wait for the next vblank on OUR crtc. This is the display's
             // clock: the compositor flips at vblank, so a new buffer is visible
@@ -799,6 +800,7 @@ AcquireStatus KmsCapture::acquire(int timeoutMs, KmsFrame& frame)
                 return AcquireStatus::Lost;
             }
             vblankUs = static_cast<int64_t>(vbl.reply.tval_sec) * 1000000 + vbl.reply.tval_usec;
+            vblankSeq = vbl.reply.sequence;
         } else {
             // Our own clock at the display's rate; re-anchored when we fell
             // behind rather than catching up in a burst.
@@ -865,6 +867,9 @@ AcquireStatus KmsCapture::acquire(int timeoutMs, KmsFrame& frame)
             // steady_clock is on Linux: same domain, no conversion.
             frame.capturedUs = steadyNowUs();
             frame.presentUs = vblankUs;
+            frame.presentRawUs = vblankUs;
+            frame.sequence = vblankSeq;
+            frame.accumulated = 1;
             // ⚠️ Capped at "now", for the same reason as WgcCapture. The kernel
             // does not read the vblank's time off a clock when the interrupt
             // fires: it PREDICTS the edge from the scanout position, and the

@@ -363,8 +363,10 @@ void UinputInput::injectButton(const InputEvent& event, bool down)
 {
     const uint16_t code = buttonCode(event.button);
     if (code == 0) return;
+    const int64_t startUs = m_ClickTrace && down ? steadyNowUs() : 0;
     emit(m_Keyboard, EV_KEY, code, down ? 1 : 0);
     emitSyn(m_Keyboard);
+    if (startUs) m_ClickTrace->press(0, startUs, steadyNowUs());
     if (down)
         m_HeldButtons.insert(code);
     else

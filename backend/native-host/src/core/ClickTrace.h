@@ -34,9 +34,10 @@
 // on Windows; on macOS the monotonic clock, which ticks with mach time):
 //
 //  - press: a mouse button press handed to the OS. `startUs` and `us` frame
-//    the call (SendInput, CGEventPost), `queuedUs` is when it was queued for
-//    the thread that follows the desktop (a SYSTEM worker), 0 when injected
-//    directly.
+//    the call (SendInput, CGEventPost; on Linux the write to the uinput device,
+//    or libei's button and frame into gamescope), `queuedUs` is when it was
+//    queued for the thread that follows the desktop (a SYSTEM worker), 0 when
+//    injected directly.
 //  - capture: one wake-up of the capture. `startUs` is when it began to wait,
 //    `us` when it returned, `status` what it brought. For a frame: `presentUs`
 //    as the session stamps it, `presentRawUs` the OS's own stamp before any
@@ -48,6 +49,11 @@
 //    compositor's timing read right after: its last vblank, its refresh
 //    period, its last composition and its frame count (DWM; on macOS the
 //    captured display's CVDisplayLink, which knows no composition).
+//    On Linux: the PipeWire buffer header's pts for the present, its seq in
+//    `composedFrames` (Mutter leaves it 0), the buffers folded into the one
+//    taken in `accumulated`, the process callback that handed it over in
+//    `deliveredUs`; with KMS, the vblank the scanout was read after and its
+//    sequence. No compositor timing beside them.
 //
 // A field the platform cannot tell is left empty. Only the first kMaxRows rows
 // are kept: minutes of a bench pass, not a session left running.

@@ -33,6 +33,13 @@
 namespace mw::native::input {
 namespace {
 
+int64_t steadyNowUs()
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 // libei's values (libei.h, 1.x): the capabilities are bits, the events count
 // from 1. Fixed ABI — the library has kept them since 1.0.
 constexpr uint32_t kCapPointer = 1u << 0;
@@ -469,8 +476,10 @@ void EiInput::inject(const InputEvent& event)
         Device* d = code ? deviceFor(kCapButton) : nullptr;
         if (!d) break;
         const bool down = event.type == Type::MouseButtonDown;
+        const int64_t startUs = m_ClickTrace && down ? steadyNowUs() : 0;
         api->button(d->handle, code, down);
         frame(d);
+        if (startUs) m_ClickTrace->press(0, startUs, steadyNowUs());
         if (down)
             m_HeldButtons.insert(static_cast<uint16_t>(code));
         else
