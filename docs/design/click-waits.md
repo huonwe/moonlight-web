@@ -613,6 +613,172 @@ une image de retard. Son encodeur vidéo prend 10 ms par image, et le Wi-Fi
 ajoute son propre délai. Ni le plein écran ni la file de capture n'y changent
 rien. Un écran virtuel à 240 Hz ferait gagner environ 2 ms, mais doublerait le
 travail de capture d'un Mac souvent sur batterie : il reste à la fréquence du
-flux. Enfin, la page de
-l'hôte ouverte à son adresse en réseau local peut rester vide : un
-rechargement, ou le lien du rendez-vous, la fait venir.
+flux. Enfin, la page de l'hôte ouverte à son adresse en réseau local peut
+rester vide : un rechargement, ou le lien du rendez-vous, la fait venir.
+
+## 9. Linux : AL0 à AL2 (09/10/2026)
+
+Hôte : l'UM790Pro (780M) sous Ubuntu 24.04.5, GNOME 46 en Wayland, noyau
+7.0.0-38, Mesa 26.2.3. La DEV est compilée depuis `main` (`~/mw-attente`) et
+tourne comme unité de `systemd --user` dans la session, en LAN seul, sans les
+capacités que donne le lanceur du paquet. L'écran virtuel de Mutter (`Meta-0`)
+fait 1922×1080 à 240 Hz, comme dans le produit. Le flux est en 1808×1016 à
+120 i/s, en HEVC. Route du jour :
+- capture d'écran de GNOME, en mémoire partagée (GNOME 46) ;
+- copie par le CPU (la conversion Vulkan refuse ces tampons) ;
+- conversion Vulkan, puis VA-API.
+
+Vulkan Video est écarté ce jour-là : sa preuve au pixel échoue (13,8 dB, avec
+les balayages d'intra-refresh), et le produit retombe sur VA-API. Le client est
+le kiosque de DualRTX, sur l'écran de l'AMD, en Ethernet, en SCTP.
+`clicktrace=1`, 60 clics par passe. Créneau de 59, de 15:24 à 16:22. Lanceurs
+`al_run.py` et `al_series*.sh` dans le scratchpad de la session (`al0/`).
+
+### 9.1 L'instrumentation
+
+- La trace de l'hôte Linux (`c9acca6f`) a les mêmes colonnes que les autres.
+  L'appui est daté autour de l'écriture dans uinput (ou du bouton libei dans
+  gamescope). Chaque image de PipeWire porte le `pts` de son en-tête, puis sa
+  remise par le rappel de la capture. En KMS, c'est le balayage après lequel
+  l'image a été lue. Mutter laisse le `seq` de PipeWire à 0.
+- Sous Wayland, l'hôte n'a pas de drapeau. `MW_LATENCY_FLAG_SKIP=*` l'arme
+  quand même (`988fa137`), pour que la sonde tourne.
+- `mw-click-target` existe en Vulkan sur Wayland (`667e0cb5`). La fenêtre
+  efface des rectangles, sans shader. L'outil date l'image vue par
+  `wp_presentation`, sur l'horloge monotone. Un pointeur uinput à lui le ramène
+  sur la fenêtre, puisqu'aucun client Wayland ne peut déplacer le pointeur.
+- `portaldmabuf=1` demande le DMA-BUF même sur l'écran virtuel de GNOME 46
+  (`c9acca6f`), pour mesurer ce que coûte la mémoire partagée (§9.5).
+
+### 9.2 AL0 et AL1 : le jeu idéal sur l'écran virtuel
+
+| Passe | Clic p50 / moyen | Clic → capture p50 | hook | composed | present | deliver | Hôte p50 / p90 | Âge des images |
+|---|---|---|---|---|---|---|---|---|
+| Plein écran r1 | 14,7 / 16,0 | 4,0 | 0,30 | 0,43 | 2,61 | 1,74 | 6,2 / 12,0 | 7,9 |
+| Plein écran r2 | 12,5 / 14,8 | 2,2 | 0,26 | 0,46 | 2,34 | 1,73 | 5,1 / 11,0 | 8,5 |
+| Synchronisé (`fifo`) | 13,4 / 14,6 | 2,4 | 0,32 | 0,36 | 2,17 | 1,74 | 5,1 / 10,5 | 8,3 |
+| Fenêtre maximisée | – | – | 0,27 | 0,40 | 2,26 | 1,78 | 5,2 / 8,2 | 8,2 |
+
+`composed` va de la présentation de l'appli à l'heure que donne
+`wp_presentation`. `present` va de là au `pts` de l'image de PipeWire, et
+`deliver` du `pts` à la remise à la capture. L'âge des images est la médiane
+capture → dessin du client, hors de la fenêtre de la sonde.
+
+- **Un clic vaut ~13,4 ms sur un hôte Linux** (client filaire). Clic →
+  capture : ~3 ms en médiane, le plus court des trois systèmes (Windows : 8,3
+  sans la détection, §6.1 ; macOS : 15, §8.3).
+- **L'entrée arrive à l'appli en 0,3 ms**, contre 1 à 2 ms sous Windows et 2 à
+  3 ms sur Mac.
+- **Mutter compose l'image dès sa présentation** : elle est « présentée »
+  0,4 ms plus tard. Un écran virtuel n'a pas de balayage. Plein écran, fenêtre
+  et synchronisé donnent le même hôte, et aucune image ne sort en direct
+  (aucune n'est en zéro-copie).
+- **L'image arrive à la capture 1,7 ms après son `pts`**, le temps que Mutter
+  la recopie en mémoire partagée. La capture la prend alors en 0,01 ms, et
+  99,9 % des images sont prises seules : il n'y a pas de file.
+- **Un clic sur deux attend une présentation de plus.** À 240 Hz, un flux à
+  120 i/s n'encode que la première présentation de chaque tranche. Sous Linux,
+  l'« Auto » ne monte pas le flux : seul l'hôte Windows applique un palier
+  (`setClientFpsStep`). L'hôte garde 2,7-6 ms quand l'image du drapeau est
+  encodée, 8-13 ms quand elle tombe sur une présentation écartée.
+- **Après la capture**, l'hôte prend 6,3 ms par image : la copie par le CPU
+  (1,65), la conversion (1,0) et l'encodage VA-API du 780M (3,5). L'image a
+  ~8 ms à son dessin. Windows en était à 3,4 ms (§6.1), mais avec le NVENC de
+  la RTX et un autre client.
+- La fenêtre maximisée s'ouvre sous la barre de GNOME (29 px) et à droite du
+  dock (66 px). Pendant un stream, l'écran virtuel est en effet l'écran
+  principal. La sonde lit le drapeau dans les 5 % du haut : elle n'y voit rien.
+  Côté hôte, la passe est la même.
+- **Porte AL1 : production.** Mutter et PipeWire n'ajoutent pas d'image par
+  rapport à DWM et DDA. Sur l'écran virtuel, Mutter n'attend même pas de
+  balayage. Le coût propre à Linux est la recopie en mémoire partagée de
+  GNOME 46, et la copie par le CPU qui suit.
+
+### 9.3 La capture KMS d'un écran physique
+
+HDMI-A-1 (l'EDID du noyau), en 1920×1080 à 60 Hz. `mw-click-target` est en
+plein écran dessus, et le binaire reçoit `cap_sys_admin` le temps des passes.
+La capture lit l'écran au balayage, donc `deliver` vaut 0.
+
+| Passe | Clic p50 / moyen | Clic → capture p50 | Hôte p50 / moyen | Balayage manqué |
+|---|---|---|---|---|
+| r1, sonde de toujours | 25,1 / 25,3 | 18,4 | 18,8 / 18,5 | 80 % |
+| r2, aléa dans l'espacement | 25,3 / 25,5 | 18,7 | 19,3 / 19,0 | 97 % |
+| r3, clic à phase aléatoire (§9.4) | 22,7 / 22,4 | 15,4 | 16,6 / 16,0 | 42 % |
+
+- **Sur un écran physique, l'image de l'appli attend la composition suivante
+  de Mutter**, qui part ~7 ms avant le balayage. 42 % des clics manquent le
+  balayage qui suit et attendent une période de plus. L'hôte garde ~1 période
+  en moyenne, soit 16 ms à 60 Hz. `wp_presentation` le dit synchronisé, avec
+  l'horloge matérielle. Mutter compose, sans sortie directe.
+- Après la capture, rien n'est copié. Conversion 0,5 ms, encodage 4,0 :
+  l'image a 6,3 ms à son dessin.
+
+### 9.4 La sonde cliquait toujours à la même phase
+
+Le clic partait juste après l'échantillonnage d'une image. Or les images
+arrivent au rythme du balayage de l'hôte : chaque clic l'atteignait donc à la
+même phase, ici 1,5 à 2 ms avant un balayage, et l'attente de la composition
+n'était mesurée qu'à cette phase-là. Un aléa dans l'espacement des clics n'y
+change rien (r2). Depuis `5c96775d`, chaque clic attend d'abord 0 à 25 ms au
+hasard. Les passes Windows du §7 avaient déjà la phase étalée (0,45 à 0,59 en
+moyenne). L'écran virtuel de Linux n'a pas de balayage, mais la comparaison
+120/240 Hz a été refaite avec la sonde corrigée (§9.5).
+
+### 9.5 AL2 : les leviers
+
+Passes alternées ABBA, 2×60 clics par bras, `mw-click-target` en plein écran
+sur l'écran virtuel.
+
+| Levier | Clic p50 / moyen | Clic → capture p50 / moyen | Hôte p50 | deliver | Hôte après la capture | Âge des images |
+|---|---|---|---|---|---|---|
+| Mémoire partagée (le produit sur GNOME 46) | 13,2 / 15,6 | 3,6 / 5,5 | 5,1-6,9 | 1,7 | 6,3 | 7,9-8,4 |
+| DMA-BUF (`portaldmabuf=1`) | 11,4 / 12,6 | 2,8 / 3,9 | 4,0-4,2 | 0,2 | 4,5 | 6,3-6,7 |
+| Écran virtuel à 240 Hz (le produit), sonde corrigée | 12,8 / 16,4 | 3,0 / 6,2 | 5,0-6,8 | | | |
+| Écran virtuel à 120 Hz, sonde corrigée | 11,2 / 13,1 | 2,3 / 3,6 | 4,6 | | | |
+
+- **AL2.1 : à 120 Hz, l'écran virtuel fait mieux que les 240 Hz du produit**
+  (−1,6 ms en médiane, −3,3 en moyenne). Mutter compose dès la présentation :
+  un écran plus rapide n'avance rien. La porte de cadence écarte en revanche
+  l'image du clic 40 à 55 % du temps à 240 Hz, contre 3 % à 120 Hz. La
+  première série, avec la sonde d'avant, donnait le même sens (13,7 / 15,6
+  contre 12,3 / 13,2). Les 240 Hz ne paieraient que si le flux suivait, et
+  seul Windows sait le faire monter. **Décision de Bruno** : l'écran virtuel
+  Linux à la fréquence du flux, comme sur Mac, ou l'« Auto » détecté sous
+  Linux.
+- **Le DMA-BUF retire ~1,8 ms en médiane, ~3 ms en moyenne.** 1,5 ms viennent
+  de la recopie de Mutter, et ~1,4 ms de la copie par le CPU (prise 1,65 →
+  0,21 ms, conversion 1,0 → 0,66). GNOME 48 et au-delà ont déjà le DMA-BUF. Sur
+  GNOME 46, il laisse des traînées du pointeur (`PortalCapture.cpp`) :
+  **décision de Bruno**.
+- **AL2.2 et AL2.3 : rien à gagner sur les tampons.** La capture prend déjà la
+  plus récente, sitôt remise. La capture de Mutter part déjà du dessin, pas
+  d'une horloge.
+- Pas faits : AL2.4 (KWin, sur une VM sans GPU), la passe Xorg avec le
+  drapeau X11, et le jeu Proton sous gamescope. La passe Xorg ne mesurerait
+  que le drapeau lui-même, alors que les trois systèmes sont comparés avec le
+  même marqueur (`mw-click-target`), et elle redémarre GDM et la prod.
+  gamescope n'expose que Xwayland, et l'outil est Wayland seulement.
+
+**Bilan de Linux.** Sur l'écran virtuel de GNOME, un clic vaut ~13 ms en
+filaire, et l'hôte en garde 5 à 7 :
+- 0,3 ms pour remettre l'entrée à l'appli ;
+- 0,4 ms pour que Mutter compose ;
+- ~2 ms jusqu'au `pts` de PipeWire, puis 1,7 ms de recopie en mémoire
+  partagée ;
+- une présentation de plus, un clic sur deux, quand la porte de cadence écarte
+  celle du clic.
+
+Après la capture, la copie par le CPU et l'encodage VA-API prennent ~6 ms. Les
+deux leviers sont la fréquence de l'écran virtuel (−3 ms en moyenne à 120 Hz)
+et le DMA-BUF (−3 ms en moyenne), qui touche aux traînées du pointeur sur
+GNOME 46. Sur un écran physique, Mutter compose avant le balayage : le clic
+attend ~1 période, soit 16 ms à 60 Hz.
+
+Concrètement, pour l'utilisateur : depuis un PC Linux sous GNOME, relié en
+filaire, un clic revient à l'écran en ~13 ms, comme depuis Windows. Linux est
+même le plus rapide entre le clic et l'image capturée. Deux réglages du produit
+pourraient retirer environ 3 ms chacun : un écran virtuel à la fréquence du
+flux plutôt qu'à 240 Hz, et, sur GNOME 46, des images passées par la carte
+graphique plutôt que par la mémoire. GNOME 48 a déjà ce second point. Sur un
+écran réel à 60 Hz, le clic attend le balayage suivant et vaut plutôt 22 ms.
