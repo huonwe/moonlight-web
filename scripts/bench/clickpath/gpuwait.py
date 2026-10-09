@@ -17,6 +17,12 @@ Submit → done then splits into: before the GPU starts, the GPU at work (the tw
 passes and the gap between them), and after it ends until the callback fires.
 The empty references (no work, one empty pass) give Chrome's own round trip.
 
+By slices (mw_ultra_slices=1), each piece's pass is timed too (parts: in,
+submitted, GPU begin, GPU end): a piece starts no earlier than its own submit,
+one more bound for the offset. What the last submit waits for then splits in
+two: the GPU still at work on the pieces before it (their last end after the
+submit), or idle, the time Chrome takes to bring the submit to the GPU.
+
 Usage: gpuwait.py <tag> [--dir bench-out/content-age] [--window-ms 2000]
 """
 import argparse
@@ -36,8 +42,8 @@ def q(xs, p):
 def row(name, xs):
     xs = [x for x in xs if x is not None]
     if not xs:
-        return "  %-34s n=0" % name
-    return "  %-34s p50 %7.3f  p90 %7.3f  mean %7.3f  (n %d)" % (
+        return "  %-38s n=0" % name
+    return "  %-38s p50 %7.3f  p90 %7.3f  mean %7.3f  (n %d)" % (
         name, q(xs, .5), q(xs, .9), statistics.mean(xs), len(xs))
 
 
@@ -68,11 +74,57 @@ def offsets(recs, window_ms, slope=0.0):
             j += 1
         chunk = recs[i:j]
         lo = max(r["t1"] - r["gpu"][0] / 1e6 - slope * r["t1"] for r in chunk)
+        # A piece by slices starts no earlier than its own submit.
+        lo = max([lo] + [p[1] - p[2] / 1e6 - slope * r["t1"]
+                         for r in chunk for p in stamped(r)])
         hi = min(r["t2"] - r["gpu"][-1] / 1e6 - slope * r["t1"] for r in chunk)
         for r in chunk:
             out[id(r)] = (lo, hi)
         i = j
     return out
+
+
+def stamped(r):
+    """A frame's pieces with their GPU times ([in, submitted, begin, end]), all
+    or none: a frame whose read-back had no room for them has none."""
+    ps = r.get("parts") or []
+    return ps if ps and all(len(p) == 4 for p in ps) else []
+
+
+def pieces(frames, off, slope):
+    """By slices: the pieces on the GPU, and what the last submit waits for."""
+    fs = [r for r in frames if r.get("sliced") and stamped(r) and len(r.get("gpu") or []) == 4]
+    if not fs:
+        return
+    print("by slices, %d frames with their pieces timed, %s pieces per frame at the median"
+          % (len(fs), q([len(stamped(r)) for r in fs], .5)))
+    print(" page clock (ms):")
+    print(row("piece in -> submitted", [p[1] - p[0] for r in fs for p in stamped(r)]))
+    print(row("first piece in -> last submit", [r["t1"] - stamped(r)[0][0] for r in fs]))
+    print(row("last piece submitted -> last submit", [r["t1"] - stamped(r)[-1][1] for r in fs]))
+    print(" GPU clock (ms):")
+    print(row("a piece's pass", [(p[3] - p[2]) / 1e6 for r in fs for p in stamped(r)]))
+    print(row("the pieces' passes, summed per frame",
+              [sum(p[3] - p[2] for p in stamped(r)) / 1e6 for r in fs]))
+    print(row("first piece begins -> last piece ends",
+              [(stamped(r)[-1][3] - stamped(r)[0][2]) / 1e6 for r in fs]))
+    print(row("last piece ends -> last pass begins",
+              [(r["gpu"][0] - stamped(r)[-1][3]) / 1e6 for r in fs]))
+    for which, k in (("offset at its lower bound", 0), ("offset at its upper bound", 1)):
+        def page(r, ns):
+            return ns / 1e6 + off[id(r)][k] + slope * r["t1"]
+        busy = [page(r, stamped(r)[-1][3]) - r["t1"] for r in fs]
+        print(" " + which)
+        print(row("piece: submit -> GPU starts",
+                  [page(r, p[2]) - p[1] for r in fs for p in stamped(r)]))
+        print(row("last piece: submit -> GPU starts",
+                  [page(r, stamped(r)[-1][2]) - stamped(r)[-1][1] for r in fs]))
+        print(row("last submit -> its pass begins", [page(r, r["gpu"][0]) - r["t1"] for r in fs]))
+        print(row("  of it, the GPU still on the pieces", [max(0.0, b) for b in busy]))
+        print(row("  of it, after the GPU is free",
+                  [page(r, r["gpu"][0]) - max(r["t1"], page(r, stamped(r)[-1][3])) for r in fs]))
+        print("  GPU still on the pieces at the last submit: %d of %d frames"
+              % (sum(1 for b in busy if b > 0), len(fs)))
 
 
 def split(recs, off, label, slope=0.0):
@@ -129,6 +181,7 @@ def main():
         print(row("present pass", [(r["gpu"][3] - r["gpu"][2]) / 1e6 for r in gpu]))
         print(row("first begin -> last end", [(r["gpu"][3] - r["gpu"][0]) / 1e6 for r in gpu]))
         split(gpu, off, "frames", slope)
+        pieces(gpu, off, slope)
 
     if refs:
         print("empty references (ms):")

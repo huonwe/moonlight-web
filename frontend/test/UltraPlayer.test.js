@@ -26,8 +26,9 @@ vi.mock('../js/stream/ultra/PyroWaveDecoder.js', () => ({
         startSlices() {
             this.slices = [];
         }
-        decodeSlice(enc, last = false) {
+        decodeSlice(enc, last = false, timestampWrites) {
             this.slices.push(last ? 'last' : 'some');
+            this.stamps = (this.stamps || []).concat([timestampWrites]);
             return true;
         }
         isReady() {
@@ -264,6 +265,64 @@ describe('UltraPlayer', () => {
         expect(refs[0].gpu).toEqual([10, 20]);
         expect(refs[0].t2).toBeGreaterThanOrEqual(refs[0].t1);
         expect(p.summary().traced).toBe(9);
+    });
+
+    it("traced by slices: each piece's pass is timestamped, read back with the frame's", async () => {
+        vi.stubGlobal(
+            'VideoFrame',
+            class {
+                constructor(src, { timestamp }) {
+                    this.timestamp = timestamp;
+                }
+            },
+        );
+        vi.stubGlobal('GPUMapMode', { READ: 1 });
+        const { PyroWaveDecoder } = await import('../js/stream/ultra/PyroWaveDecoder.js');
+        const { p, frames, done } = player();
+        p.trace = [];
+        p.decoder = new PyroWaveDecoder();
+        p.canvas = {};
+        p.context = {};
+        let resolved = 0;
+        p.device.createCommandEncoder = () => ({
+            finish: () => ({}),
+            resolveQuerySet: (set, first, count) => {
+                resolved = count;
+            },
+            copyBufferToBuffer() {},
+        });
+        p._querySet = {};
+        p._queryBuf = {};
+        // The read-back answers 1000, 2000, ... ns, one per query.
+        p._reads = [
+            {
+                slot: 0,
+                busy: false,
+                buf: {
+                    mapAsync: () => Promise.resolve(),
+                    getMappedRange: (off, size) =>
+                        new BigUint64Array(size / 8).map((v, i) => BigInt(1000 * (i + 1))).buffer,
+                    unmap() {},
+                },
+            },
+        ];
+        p.pushPart(7, 0, new Uint8Array([1, 2]));
+        p.pushPart(7, 2, new Uint8Array([3]));
+        p.push(new Uint8Array([1, 2, 3, 4]), 1, 10, 7);
+        // The pieces in the pairs after the frame's four, the last piece in 0-1.
+        expect(p.decoder.stamps.map((tw) => tw.beginningOfPassWriteIndex)).toEqual([4, 6, 0]);
+        expect(resolved).toBe(8);
+        done();
+        for (let k = 0; k < 4; k++) await Promise.resolve();
+        expect(frames).toEqual([1]);
+        const [rec] = p.trace;
+        expect(rec.sliced).toBe(true);
+        expect(rec.gpu).toEqual([1000, 2000, 3000, 4000]);
+        expect(rec.parts.map((x) => x.slice(2))).toEqual([
+            [5000, 6000],
+            [7000, 8000],
+        ]);
+        expect(rec.parts[1][1]).toBeGreaterThanOrEqual(rec.parts[0][1]);
     });
 
     it('nudged: empty submits while the frame waits, none once it is done', async () => {

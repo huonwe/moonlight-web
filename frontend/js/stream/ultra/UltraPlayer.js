@@ -56,6 +56,9 @@ const GPU_EVERY = 8;
 const TRACE_KEEP = 16384;
 const TRACE_READS = 6;
 const REF_EVERY = 8;
+// Traced, by slices: the passes of a frame's pieces carry GPU timestamps too,
+// for this many pieces at most (a pair each, after the frame's own four).
+const PART_STAMPS = 62;
 // A query set resolves at a multiple of 256 bytes.
 const RESOLVE_STRIDE = 256;
 
@@ -117,8 +120,10 @@ export class UltraPlayer {
             gpuPresent: [],
             spin: [],
         };
-        // GPU timestamp read-backs: one normally, TRACE_READS when tracing.
+        // GPU timestamp read-backs: one normally, TRACE_READS when tracing,
+        // each its own slot of the resolve buffer.
         this._reads = [];
+        this._slotBytes = RESOLVE_STRIDE;
         // Bench switch (localStorage mw_ultra_early=1): hand the frame over at submit.
         try {
             this.early = globalThis.localStorage?.getItem('mw_ultra_early') === '1';
@@ -132,11 +137,14 @@ export class UltraPlayer {
         // performance.now() but the GPU's (ns, its own clock, put on this one
         // by the bench from the bounds submit and work done give it).
         //   frame: {host, ts, at, t0, t1, t2, t3, sliced, gpu: [decode begin,
-        //          end, present begin, end] | null, nudge?: [from, first, count]}
+        //          end, present begin, end] | null, nudge?: [from, first, count],
+        //          parts?: [[in, submitted, GPU begin?, GPU end?], ...]}
         //   reference: {ref: true, t1, t2, gpu: [begin, end] | null}
         // at: the frame in; t0: its decode starts; t1: submitted; t2: work
         // done; t3: the VideoFrame made; nudged, the nudges' start planned,
-        // their loop's real start (0 if it never ran) and how many.
+        // their loop's real start (0 if it never ran) and how many. By
+        // slices, each piece submitted: when it came, when its work went,
+        // and its pass on the GPU (when the frame's read-back had room).
         this.trace = null;
         try {
             if (globalThis.localStorage?.getItem('mw_ultra_trace') === '1') this.trace = [];
@@ -200,14 +208,16 @@ export class UltraPlayer {
         this.context.configure({ device: this.device, format: 'rgba8unorm', alphaMode: 'opaque' });
         if (timestamps) {
             const reads = this.trace ? TRACE_READS : 1;
-            this._querySet = this.device.createQuerySet({ type: 'timestamp', count: 4 });
+            const count = this.trace ? 4 + 2 * PART_STAMPS : 4;
+            this._slotBytes = Math.ceil((count * 8) / RESOLVE_STRIDE) * RESOLVE_STRIDE;
+            this._querySet = this.device.createQuerySet({ type: 'timestamp', count });
             this._queryBuf = this.device.createBuffer({
-                size: RESOLVE_STRIDE * reads,
+                size: this._slotBytes * reads,
                 usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
             });
             for (let i = 0; i < reads; i++) {
                 const buf = this.device.createBuffer({
-                    size: 32,
+                    size: count * 8,
                     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
                 });
                 this._reads.push({ buf, slot: i, busy: false });
@@ -267,7 +277,13 @@ export class UltraPlayer {
         // A frame by slices still waits for the GPU: this one comes whole.
         if (s && s.whole) return;
         if (off === 0) {
-            s = this._slice = { fid, off: 0, carry: null, whole: false };
+            s = this._slice = {
+                fid,
+                off: 0,
+                carry: null,
+                whole: false,
+                parts: this.trace ? [] : null,
+            };
             dec.clear();
             dec.startSlices();
         } else if (!s || s.fid !== fid || s.off !== off) {
@@ -281,7 +297,20 @@ export class UltraPlayer {
             return;
         }
         const enc = this.device.createCommandEncoder();
-        if (dec.decodeSlice(enc)) this.device.queue.submit([enc.finish()]);
+        // Traced: the piece's pass timestamped, in the next pair after the frame's four.
+        const k = s.parts && this._querySet && s.parts.length < PART_STAMPS ? s.parts.length : -1;
+        const tw =
+            k < 0
+                ? undefined
+                : {
+                      querySet: this._querySet,
+                      beginningOfPassWriteIndex: 4 + 2 * k,
+                      endOfPassWriteIndex: 5 + 2 * k,
+                  };
+        if (dec.decodeSlice(enc, false, tw)) {
+            this.device.queue.submit([enc.finish()]);
+            s.parts?.push([t0, performance.now()]);
+        }
         this.stats.parts++;
         this._note('part', performance.now() - t0);
     }
@@ -383,7 +412,10 @@ export class UltraPlayer {
         if (job.slice) dec.decodeSlice(enc, true, tw(0, 1));
         else dec.decode(enc, tw(0, 1), ['dequant', 'idwt']);
         dec.present(enc, this.context, this.limited, tw(2, 3));
-        if (read) this._resolveInto(enc, read, 4);
+        // Traced by slices, the pieces' pairs come back with the frame's four.
+        const parts = job.slice?.parts || null;
+        const count = 4 + 2 * (parts ? Math.min(parts.length, PART_STAMPS) : 0);
+        if (read) this._resolveInto(enc, read, count);
         this.device.queue.submit([enc.finish()]);
         const t1 = performance.now();
         this._note('record', t1 - t0);
@@ -398,10 +430,11 @@ export class UltraPlayer {
                   t3: null,
                   sliced: !!job.slice,
                   gpu: null,
+                  ...(parts ? { parts } : {}),
               }
             : null;
         if (rec) this._keep(rec);
-        if (read) this._readGpuTimes(read, 4, rec);
+        if (read) this._readGpuTimes(read, count, rec);
         this._nudge?.begin(t1);
         const emit = (from) => {
             let frame = null;
@@ -511,7 +544,7 @@ export class UltraPlayer {
     // The first @p count timestamps of the set, resolved into @p read's slot
     // and copied to it.
     _resolveInto(enc, read, count) {
-        const off = read.slot * RESOLVE_STRIDE;
+        const off = read.slot * this._slotBytes;
         enc.resolveQuerySet(this._querySet, 0, count, this._queryBuf, off);
         enc.copyBufferToBuffer(this._queryBuf, off, read.buf, 0, count * 8);
         read.busy = true;
@@ -556,12 +589,17 @@ export class UltraPlayer {
         buf.mapAsync(GPUMapMode.READ, 0, count * 8).then(
             () => {
                 const t = new BigUint64Array(buf.getMappedRange(0, count * 8));
-                if (count === 4) {
+                if (count >= 4) {
                     // Nanoseconds; a pair out of order (a quantized or reset clock) is skipped.
                     if (t[1] > t[0]) this._note('gpuDecode', Number(t[1] - t[0]) / 1e6);
                     if (t[3] > t[2]) this._note('gpuPresent', Number(t[3] - t[2]) / 1e6);
                 }
-                if (rec) rec.gpu = Array.from(t, Number);
+                if (rec) {
+                    rec.gpu = Array.from(t.subarray(0, Math.min(count, 4)), Number);
+                    // The pieces' pairs, after the frame's four.
+                    for (let i = 0; 6 + 2 * i <= count; i++)
+                        rec.parts[i].push(Number(t[4 + 2 * i]), Number(t[5 + 2 * i]));
+                }
                 buf.unmap();
                 read.busy = false;
             },
