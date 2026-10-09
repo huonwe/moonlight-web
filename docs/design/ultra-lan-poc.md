@@ -2239,6 +2239,82 @@ Même au mieux, ce levier n'enlève qu'~1 ms des ~4,9 ms de retard sur le HEVC
 du produit. Le plus gros poste reste l'arrivée : +2,2-2,3 ms pour 177 Ko par
 image.
 
+### 6.31 Un iDWT deux fois plus rapide sur les iGPU AMD, au labo (09/10/2026, 23:31-23:36)
+
+Le levier du §6.30, d'abord au labo, sans stream. Il tourne dans le Chrome
+headless de `decoder_lab.py`, sur les quatre GPU l'un après l'autre (banc donné
+par 59). Le labo a quatre options de plus :
+- `--split` chronomètre chaque étape seule, dans sa propre passe : la
+  déquantification, chaque niveau de l'iDWT, la conversion (`decodeSplit()`).
+- `--idwt 1|2` choisit le shader de l'iDWT.
+- `--cmp` compare les plans f32 à ceux de l'ancien shader, image par image.
+- `--bw` mesure la bande passante mémoire du GPU, en copiant 64 Mio.
+
+**Le nouveau shader** (`IDWT2_WGSL` dans `PyroWaveDecoder.js`, désormais le
+défaut) reprend la structure de `idwt.comp` de l'amont :
+- 64 threads par tuile de 32×32, au lieu de 256.
+- Chaque thread fait les quatre étapes de levage dans ses registres. Il les
+  fait sur une suite de 8 sorties (16 échantillons avec leur marge) de deux
+  lignes à la fois, puis de deux colonnes.
+- La mémoire du groupe ne garde la tuile qu'entre les étapes. Il y a trois
+  barrières au lieu de neuf, et environ six fois moins d'accès à la mémoire
+  partagée.
+- Il fait les mêmes opérations, dans le même ordre. Ses plans f32 sont donc
+  identiques, au bit près, à ceux de l'ancien. C'est vrai sur SwiftShader
+  (essayé d'abord) et sur les quatre GPU, pour une image entière comme par
+  tranches. L'écart à l'oracle reste de 1 code.
+- L'ancien shader reste pour l'A/B du banc : `mw_ultra_idwt=1` dans la page,
+  `--idwt 1` au labo. Le résumé du lecteur dit lequel a tourné (`idwt`).
+
+Chaque niveau de l'iDWT seul, ancien → nouveau shader (1080p, `game10` à 170
+Mbit/s, p50 en ms) :
+
+| GPU | Niveau 4 | 3 | 2 | 1 | 0 | iDWT | Image entière |
+|---|---|---|---|---|---|---|---|
+| 780M (UM790Pro) | 0,024 → 0,019 | 0,050 → 0,030 | 0,147 → 0,073 | 0,524 → 0,265 | 0,692 → 0,344 | 1,44 → 0,73 | 1,98 → 1,28 |
+| iGPU AMD (2 CU) | 0,039 → 0,018 | 0,118 → 0,051 | 0,395 → 0,173 | 1,50 → 0,70 | 1,98 → 0,90 | 4,03 → 1,84 | 5,06 → 2,90 |
+| Arc A380 | 0,022 → 0,013 | 0,022 → 0,016 | 0,064 → 0,052 | 0,217 → 0,179 | 0,301 → 0,272 | 0,63 → 0,53 | 1,15 → 1,06 |
+| RTX 5060 Ti | 0,005 → 0,004 | 0,007 → 0,005 | 0,014 → 0,008 | 0,042 → 0,024 | 0,054 → 0,031 | 0,121 → 0,072 | 0,170 → 0,122 |
+
+- « Image entière » est le décodage du labo en une passe : déquantification,
+  iDWT et conversion en 8 bits. Le produit fait l'affichage à la place de cette
+  conversion.
+- Les autres étapes ne changent pas. Sur la 780M, la déquantification prend
+  0,34 ms et la conversion 0,21 ms. Sur l'iGPU AMD : 0,66 et 0,28 ms. Sur
+  l'Arc : 0,28 et 0,24 ms. Sur la RTX : 0,037 et 0,016 ms.
+- En 16 morceaux, sur la 780M, il reste au dernier morceau 0,207 ms au lieu de
+  0,335 pour `game10`, et 0,112 au lieu de 0,185 pour `text10`. En 8 morceaux,
+  0,29 et 0,21 ms (0,48 et 0,33 avec l'ancien shader au §6.24).
+
+Ce que le labo dit :
+- **Le coût d'un niveau suit son nombre d'échantillons.** Sur la 780M, avec
+  l'ancien shader, les niveaux 1 et 0 coûtent tous deux 0,33 ns par
+  échantillon. Le niveau 1 n'a donc rien d'anormal.
+- **Les barrières entre dispatches ne pèsent pas.** Les étapes, chacune dans
+  sa passe, font 1,98 ms de bout en bout, autant que le décodage en une seule
+  passe. Leurs cinq niveaux font 1,44 ms, comme l'iDWT d'un seul tenant au
+  §6.13.
+- **Le morceau lourd du §6.30 reste à expliquer.** Au labo, le niveau 1 seul
+  prend 0,52 ms. Le morceau lourd du flux (1,2 ms) porte donc plus que lui, ou
+  tourne plus lentement. Le banc sur le câble le dira, avec les mêmes
+  horodatages.
+- **Sur la 780M, le nouveau shader approche la limite de la mémoire.** La copie
+  y va à 75 Go/s (iGPU AMD 64, Arc 145, RTX 401). En f32, le niveau 0 lit
+  8,4 Mo de bandes et écrit 8,4 Mo, soit au moins 0,22 ms. Le nouveau shader y
+  met 0,34 ms.
+- **La suite du gain demande moins d'octets.** L'amont garde ses deux niveaux
+  fins en FP16 (`PYROWAVE_PRECISION=1` : R16F, calculs en f32). Faire de même
+  diviserait par deux les octets des deux niveaux fins : déquantification, iDWT
+  et affichage. Sur la 780M, j'estime le gain de plus à 0,3-0,5 ms.
+
+**Ce que le flux peut en attendre** (à mesurer sur le câble) :
+- Sur la 780M, une image entière devrait se décoder ~0,7 ms plus vite.
+- Par tranches, le gain tombe là où la dernière soumission attendait le GPU,
+  encore sur les morceaux : 1,35-2,0 ms au §6.30. Les niveaux 1 et 0 y
+  coûtent moitié moins. La passe finale devrait donc partir jusqu'à ~0,5-0,7
+  ms plus tôt.
+- Même ainsi, ce n'est qu'une part des ~4,9 ms de retard sur le HEVC.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
