@@ -32,6 +32,8 @@ const char* kUsage =
     "  --sync 0|1           present at once (0, default) or on the refresh (1)\n"
     "  --no-tearing         with --sync 0, wait for the refresh rather than tear\n"
     "  --on-click           draw only when the flag changes (default: continuously)\n"
+    "  --no-flag            never draw the flag: a window that only takes the clicks,\n"
+    "                       under the host's own flag (with --on-click: one picture)\n"
     "  --fps <n>            continuous frames a second at most, 0 none (default 240)\n"
     "  --react frame        a click waits for the next frame due (default: at once)\n"
     "  --input-first        read the input before waiting for the swap chain, as a\n"
@@ -76,6 +78,8 @@ int main(int argc, char** argv)
             o.tearing = false;
         } else if (a == "--on-click") {
             o.continuous = false;
+        } else if (a == "--no-flag") {
+            o.drawFlag = false;
         } else if (a == "--fps" && next) {
             ok = takeInt(argv[++i], o.fps, 0, 1000);
         } else if (a == "--react" && next) {

@@ -75,6 +75,10 @@ struct Options
     int durationS = 600;
     /// Where the log goes; empty: stdout.
     std::string out;
+    /// Draw the flag on a click (the ideal game), or never: a window that
+    /// only takes the clicks, under the host's own flag, so the bench's
+    /// injected clicks land on it rather than in someone's application.
+    bool drawFlag = true;
 };
 
 /// A microsecond count on the OS's monotonic clock — on Windows the

@@ -385,8 +385,9 @@ def main():
             time.sleep(2)
             print("  client window full screen", flush=True)
         # The Virtual Display only exists once the stream is up: it is the
-        # screen that was not there before the launch.
-        if a.target == "vdisplay":
+        # screen that was not there before the launch. A remote host's is
+        # on that machine, where its own tools find it.
+        if a.target == "vdisplay" and not rh:
             time.sleep(2)
             vdd = [m for m in monitors() if m[0] not in before]
             if not vdd:
@@ -396,7 +397,14 @@ def main():
             os.environ["MW_BENCH_CONTENT_RECT"] = "%s,%s,%s,%s" % (x, y, w, h)
             print("virtual display", " ".join(vdd[0]), flush=True)
         target = None
-        if a.hold > 0 and a.target == "vdisplay" and os.environ.get("MW_BENCH_CLICK_TARGET"):
+        if a.hold > 0 and a.target == "vdisplay" and os.environ.get("MW_BENCH_CLICK_TARGET") and rh:
+            # The same on a remote host (plan « attente », AM0): the tool's
+            # path is the host's, its log fetched at the end.
+            print("  " + rh.click_target_start(
+                a.tag, int(a.hold) + 300, os.environ["MW_BENCH_CLICK_TARGET"],
+                os.environ.get("MW_BENCH_CLICK_TARGET_ARGS", "").split()), flush=True)
+            target = rh
+        elif a.hold > 0 and a.target == "vdisplay" and os.environ.get("MW_BENCH_CLICK_TARGET"):
             # Plan « attente » A1: mw-click-target over the virtual display, the
             # click's ideal game drawing the flag itself (the host's kept off
             # every screen: MW_LATENCY_FLAG_SKIP=*); its log beside the pass.
@@ -419,7 +427,10 @@ def main():
             # A still screen: the way up with almost no video coming down.
             uplink = uplink_runs(d, a.uplink, a.tag)
             clicks = click_flag(d, a.clicks, tag=a.tag) if a.clicks > 0 else None
-            if target:
+            if target is rh and rh:
+                print("  " + rh.click_target_stop(os.path.join(age.OUT, a.tag + ".target.jsonl")),
+                      flush=True)
+            elif target:
                 target.terminate()
             stats = d.stats()
             with open(os.path.join(age.OUT, a.tag + ".json"), "w") as f:

@@ -146,6 +146,14 @@ class RemoteHost:
     def content_stop(self):
         raise NotImplementedError
 
+    def click_target_start(self, tag, secs, binary, args):
+        """mw-click-target on the host's virtual display (plan « attente »), its
+        log kept on the host until click_target_stop()."""
+        raise NotImplementedError
+
+    def click_target_stop(self, dest):
+        raise NotImplementedError
+
 
 class LinuxHost(RemoteHost):
     mid = "um790pro"
@@ -244,6 +252,39 @@ pgrep -f "user-data-dir=%(p)s" >/dev/null && echo "content up: %(u)s" || echo "c
     def content_stop(self):
         return self.sh('pkill -f "user-data-dir=%s" 2>/dev/null; echo content stopped' %
                        self.PROFILE).strip()
+
+    # Plan « attente », AM0-AM1. A job of the GUI session (launchctl gui/<uid>),
+    # as an application the user opened: a binary started over SSH has no
+    # window server. ProcessType Interactive, or App Nap slows its timers.
+    TARGET_LABEL = "com.moonlightweb.attente.click-target"
+    TARGET_LOG = "/tmp/mw-attente-click-target.jsonl"
+
+    def click_target_start(self, tag, secs, binary, args):
+        argv = [binary, "--display", "Virtual Display", "--out", self.TARGET_LOG,
+                "--duration", str(int(secs))] + list(args)
+        script = r"""
+U=$(id -u)
+launchctl bootout gui/$U/%(label)s 2>/dev/null
+rm -f %(log)s
+python3 - <<'PY'
+import plistlib, sys
+plistlib.dump({"Label": %(label)r, "ProgramArguments": %(argv)r, "ProcessType": "Interactive",
+               "RunAtLoad": True, "StandardErrorPath": "/tmp/mw-attente-click-target.err"},
+              open("/tmp/mw-attente-click-target.plist", "wb"))
+PY
+launchctl bootstrap gui/$U /tmp/mw-attente-click-target.plist
+sleep 3
+if pgrep -f "%(binary)s" >/dev/null; then echo "click target up: %(argstr)s"; head -c 400 %(log)s; else echo "click target did not start:"; tail -5 /tmp/mw-attente-click-target.err; fi
+""" % {"label": self.TARGET_LABEL, "log": self.TARGET_LOG, "argv": argv, "binary": binary,
+       "argstr": " ".join(args)}
+        return self.sh(script, timeout=60).strip()
+
+    def click_target_stop(self, dest):
+        self.sh("launchctl bootout gui/$(id -u)/%s 2>/dev/null; sleep 1" % self.TARGET_LABEL)
+        text = self.sh("cat %s 2>/dev/null" % self.TARGET_LOG, timeout=60)
+        with open(dest, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        return "click target stopped, %d lines" % len(text.splitlines())
 
 
 HOSTS = {"um790pro": LinuxHost, "lx": LinuxHost, "mw-mac": MacHost, "macos": MacHost}

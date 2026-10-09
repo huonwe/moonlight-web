@@ -310,6 +310,12 @@ void drawNow(int64_t now);
     using namespace clicktarget;
     State* s = g_State;
     if (!s) return;
+    if (!s->options->drawFlag) {
+        // Only a place for the clicks to land: counted, nothing drawn.
+        std::lock_guard<std::mutex> lock(s->mutex);
+        ++s->clicks;
+        return;
+    }
     PendingClick c;
     c.downUs = steadyNowUs();
     c.eventUs = mediaToSteadyUs(event.timestamp);
@@ -616,7 +622,8 @@ int run(const Options& o, Log& log)
                  (o.fullscreenSpace ? "space" : (o.fullscreen ? "fullscreen" : "window")) +
                  "\",\"sync\":" + std::to_string(o.syncInterval) + ",\"continuous\":" +
                  (o.continuous ? "true" : "false") + ",\"fps\":" + std::to_string(o.fps) +
-                 ",\"react\":\"" + (o.reactAtOnce ? "now" : "frame") + "\"}");
+                 ",\"react\":\"" + (o.reactAtOnce ? "now" : "frame") +
+                 "\",\"flag\":" + (o.drawFlag ? "true" : "false") + "}");
 
         state.periodUs = o.continuous && o.fps > 0 ? 1000000 / o.fps : 0;
         state.endUs = steadyNowUs() + int64_t(o.durationS) * 1000000;

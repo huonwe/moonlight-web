@@ -121,6 +121,7 @@ struct State
     std::deque<PendingClick> pending;
     int64_t flagUntilUs = 0;
     bool redraw = false;
+    bool drawFlag = true;
 };
 
 State* g_State = nullptr;
@@ -129,7 +130,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
     case WM_LBUTTONDOWN:
-        if (g_State) {
+        if (g_State && !g_State->drawFlag) {
+            ++g_State->clicks;
+        } else if (g_State) {
             PendingClick c;
             c.id = ++g_State->clicks;
             c.downUs = steadyNowUs();
@@ -437,6 +440,7 @@ int run(const Options& o, Log& log)
     wc.lpszClassName = kClass;
     RegisterClassW(&wc);
     State state;
+    state.drawFlag = o.drawFlag;
     g_State = &state;
     // Topmost: a window someone opens on the screen it took would otherwise
     // come over it and take the clicks (09/10: an Explorer window, 60 clicks).
@@ -516,7 +520,8 @@ int run(const Options& o, Log& log)
              std::to_string(o.syncInterval) + ",\"tearing\":" + (r.tearing ? "true" : "false") +
              ",\"continuous\":" + (o.continuous ? "true" : "false") + ",\"fps\":" +
              std::to_string(o.fps) + ",\"react\":\"" + (o.reactAtOnce ? "now" : "frame") +
-             "\",\"input\":\"" + (o.inputAfterWait ? "after-wait" : "first") + "\"}");
+             "\",\"input\":\"" + (o.inputAfterWait ? "after-wait" : "first") +
+             "\",\"flag\":" + (o.drawFlag ? "true" : "false") + "}");
 
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
                                           TIMER_ALL_ACCESS);
