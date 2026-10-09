@@ -266,6 +266,42 @@ describe('UltraPlayer', () => {
         expect(p.summary().traced).toBe(9);
     });
 
+    it('nudged: empty submits while the frame waits, none once it is done', async () => {
+        vi.stubGlobal(
+            'VideoFrame',
+            class {
+                constructor(src, { timestamp }) {
+                    this.timestamp = timestamp;
+                }
+            },
+        );
+        const { PyroWaveDecoder } = await import('../js/stream/ultra/PyroWaveDecoder.js');
+        const { GpuNudge } = await import('../js/stream/ultra/GpuNudge.js');
+        const { p, frames, done } = player();
+        let submits = 0;
+        p.device.queue.submit = () => submits++;
+        p.decoder = new PyroWaveDecoder();
+        p.canvas = {};
+        p.context = {};
+        p.trace = [];
+        p._nudge = new GpuNudge(p.device, 'all');
+        p.push(new Uint8Array([1]), 1, 10);
+        expect(submits).toBe(1); // the frame's own
+        await new Promise((r) => globalThis.setTimeout(r, 5));
+        expect(submits).toBeGreaterThan(1);
+        done();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(frames).toEqual([1]);
+        const [rec] = p.trace;
+        expect(rec.nudge[2]).toBe(submits - 1);
+        expect(p.summary().nudge).toMatchObject({ mode: 'all', waits: 1, nudges: submits - 1 });
+        const after = submits;
+        await new Promise((r) => globalThis.setTimeout(r, 5));
+        expect(submits).toBe(after);
+        p._nudge.destroy();
+    });
+
     it('by slices: a piece missing, and the frame decodes whole', async () => {
         vi.stubGlobal(
             'VideoFrame',

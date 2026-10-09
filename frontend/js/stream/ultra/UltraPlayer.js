@@ -34,8 +34,13 @@
  * are dequantized, and the coarse levels transformed, before the frame is
  * whole; its last piece leaves only the rest to do. A piece missing, or a
  * frame by slices waiting for the GPU, and the next frame comes whole.
+ *
+ * Nudged (WebGPU, bench key mw_ultra_nudge=1 or all): while a frame waits for
+ * its work done, empty submits wake Chrome's GPU process up, which otherwise
+ * sees the end 2 to 3 ms late (GpuNudge.js).
  */
 
+import { GpuNudge, nudgeMode } from './GpuNudge.js';
 import { PyroWaveDecoder } from './PyroWaveDecoder.js';
 import { PyroWaveDecoderGL, glDecoderSupported } from './PyroWaveDecoderGL.js';
 
@@ -110,6 +115,7 @@ export class UltraPlayer {
             frame: [],
             gpuDecode: [],
             gpuPresent: [],
+            spin: [],
         };
         // GPU timestamp read-backs: one normally, TRACE_READS when tracing.
         this._reads = [];
@@ -119,14 +125,18 @@ export class UltraPlayer {
         } catch {
             this.early = false;
         }
+        // Bench switch (mw_ultra_nudge): the GpuNudge built at init(), WebGPU only.
+        this.nudgeMode = nudgeMode();
+        this._nudge = null;
         // The timeline, when traced: one record per frame decoded, all on
         // performance.now() but the GPU's (ns, its own clock, put on this one
         // by the bench from the bounds submit and work done give it).
         //   frame: {host, ts, at, t0, t1, t2, t3, sliced, gpu: [decode begin,
-        //          end, present begin, end] | null}
+        //          end, present begin, end] | null, nudge?: [from, first, count]}
         //   reference: {ref: true, t1, t2, gpu: [begin, end] | null}
         // at: the frame in; t0: its decode starts; t1: submitted; t2: work
-        // done; t3: the VideoFrame made.
+        // done; t3: the VideoFrame made; nudged, the nudges' start planned,
+        // their loop's real start (0 if it never ran) and how many.
         this.trace = null;
         try {
             if (globalThis.localStorage?.getItem('mw_ultra_trace') === '1') this.trace = [];
@@ -150,6 +160,7 @@ export class UltraPlayer {
             stats: { ...this.stats },
             gpuTimestamps: !!this._querySet,
             early: this.early,
+            nudge: this._nudge ? { mode: this._nudge.mode, ...this._nudge.stats } : null,
             traced: this.trace ? this.trace.length : null,
         };
         for (const [k, xs] of Object.entries(this.times)) out[k] = quantiles(xs);
@@ -202,8 +213,16 @@ export class UltraPlayer {
                 this._reads.push({ buf, slot: i, busy: false });
             }
         }
+        if (this.nudgeMode && typeof MessageChannel === 'function')
+            this._nudge = new GpuNudge(this.device, this.nudgeMode);
         this.api = 'webgpu';
-        this.log('[MW-ULTRA] PyroWave decoder ready, ' + this.width + 'x' + this.height);
+        this.log(
+            '[MW-ULTRA] PyroWave decoder ready, ' +
+                this.width +
+                'x' +
+                this.height +
+                (this._nudge ? ', nudged (' + this._nudge.mode + ')' : ''),
+        );
         return true;
     }
 
@@ -383,6 +402,7 @@ export class UltraPlayer {
             : null;
         if (rec) this._keep(rec);
         if (read) this._readGpuTimes(read, 4, rec);
+        this._nudge?.begin(t1);
         const emit = (from) => {
             let frame = null;
             try {
@@ -407,6 +427,11 @@ export class UltraPlayer {
                 const t2 = performance.now();
                 this._note('done', t2 - t1);
                 if (rec) rec.t2 = t2;
+                const nw = this._nudge?.end(t2);
+                if (nw) {
+                    this._note('spin', nw.spin);
+                    if (rec) rec.nudge = [nw.from, nw.first, nw.nudges];
+                }
                 if (!this.early) emit(t2);
                 // Traced: an empty reference now and then, on an idle GPU.
                 if (this.trace && !this._waiting && ++this._refCount % REF_EVERY === 0)
@@ -416,6 +441,7 @@ export class UltraPlayer {
             () => {
                 this._busy = false;
                 this.stats.errors++;
+                this._nudge?.end();
             },
         );
     }
@@ -554,6 +580,8 @@ export class UltraPlayer {
     }
 
     destroy() {
+        this._nudge?.destroy();
+        this._nudge = null;
         this.decoder?.destroy();
         this.device?.destroy();
         this.gl?.getExtension('WEBGL_lose_context')?.loseContext();
