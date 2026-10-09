@@ -174,16 +174,22 @@ def refresh_grid(present):
 
 
 def stamp_offset(client_ms, present):
-    """x of client_flag_frames, in µs: the least distance from a client stamp to
-    the nearest present at or after it, over the frames the client logged."""
-    best = None
-    for h in client_ms[::7]:
-        j = bisect.bisect_left(present, h * 1000 - 3000)
-        near = [p - h * 1000 for p in present[j:j + 4] if abs(p - h * 1000) < 3000]
-        if near:
-            d = min(near, key=abs)
-            best = d if best is None else min(best, d)
-    return best or 0
+    """x of client_flag_frames, in µs: the one that puts a present in
+    [stamp + x, stamp + x + 1 ms) for the most frames the client logged. The
+    least distance to the nearest present, used before, held while the presents
+    were 7-8 ms apart; at 240 Hz (09/10/2026) a present 4 ms apart came closer
+    than the frame's own and gave -1.5 ms instead of 0.65."""
+    sample = client_ms[::3]
+    best = (0, 0)
+    for x in range(-3000, 3000, 25):
+        hit = 0
+        for h in sample:
+            lo = h * 1000 + x
+            j = bisect.bisect_left(present, lo)
+            if j < len(present) and present[j] < lo + 1000:
+                hit += 1
+        best = max(best, (hit, -x))
+    return -best[1]
 
 
 def one(tag, a):

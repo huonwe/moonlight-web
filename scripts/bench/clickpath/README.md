@@ -55,6 +55,30 @@ The frame that showed the flag is the client's, when the pass has
 `<tag>.json` and `<tag>.clicks.frames.csv`; otherwise the first presented after
 the flag was composed.
 
+## A, every frame — presentmon.py
+
+`hostpath.py` follows the click's frame. `presentmon.py` follows all the frames
+of an application or a game, from its present to the capture, from PresentMon
+run beside the pass:
+
+```
+PresentMon-x64.exe --process_name mw-click-target.exe --process_name re9.exe ^
+  --output_file bench-out\content-age\<tag>.presentmon.csv --qpc_time --no_console_stats ^
+  --session_name mw-attente --stop_existing_session --timed 900 --terminate_after_timed
+PresentMon-x64.exe --session_name mw-attente --terminate_existing_session   (at the end)
+python scripts/bench/clickpath/presentmon.py <tag> [--target <mw-click-target log>]
+```
+
+PresentMon 2 (AMD's build ships with its driver, in `C:\Program Files\AMD\CNext\CNext`)
+traces without elevation for a member of « Performance Log Users ». The pass
+needs `clicktrace=1` too: DDA's `LastPresentTime` of every picture. Per
+process: frames a second, present modes, frames never shown, then per frame
+`shown` (present → on the screen, by PresentMon), `dda` (that moment → DDA's
+present for the picture that carried it: the two agree when ~0), `handoff`,
+`total` (present → handed over), and the compositions' rhythm. A game driven
+beside the pass writes `<tag>.re9.txt`, whose `scene from here` and `scene to
+here` lines bound the frames counted.
+
 ## B — gpuwait.py
 
 What the pass needs: `localStorage.mw_ultra_trace = '1'` in the client's page
