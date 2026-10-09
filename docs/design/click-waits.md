@@ -569,9 +569,10 @@ Passes alternées ABBA, 2×60 clics par bras, `mw-click-target` en plein écran.
   (~1,2 sur le clic). Le flux reste à 120 i/s : la porte de cadence en prend
   une présentation sur deux. SCK livre alors deux fois plus d'images (12 995
   contre 7 341 en 72 s), et la moitié sont remplacées sans être prises.
-  `CGVirtualDisplay` accepte bien 240 Hz. Le produit garde aujourd'hui sur Mac
-  la fréquence du flux (`kFasterThanStream`) : passer à 240 Hz est une décision
-  de Bruno, qui coûte du travail de capture.
+  `CGVirtualDisplay` accepte bien 240 Hz. **Le produit garde sur Mac la
+  fréquence du flux** (`kFasterThanStream`), décision de Bruno du 09/10 : un
+  Mac tourne souvent sur batterie, et deux fois plus de captures pour ~1 ms au
+  clic ne valent pas l'énergie.
 - **AM2.2 : rien à gagner sur la file de SCK.** Sans intervalle minimal, l'écart
   reste dans le bruit. Avec une seule surface, la capture se fige : 2 images en
   84 s, parce que le moteur en garde une. Avec deux, c'est pire.
@@ -601,15 +602,17 @@ du plan natif (§9).
 - 9-10 ms de composition et de remise par ScreenCaptureKit à 120 Hz ;
 - 3 ms d'attente du fil de capture, occupé par l'encodeur.
 
-L'encodeur prend ensuite 10 ms par image. Il ne reste qu'un petit levier sur la
-capture : l'écran virtuel à 240 Hz, environ −2 ms. Le gros du coût est dans
-l'encodeur VideoToolbox et dans le Wi-Fi.
+L'encodeur prend ensuite 10 ms par image. Le seul levier de la capture,
+l'écran virtuel à 240 Hz (environ −2 ms), reste de côté pour la batterie. Le
+gros du coût est dans l'encodeur VideoToolbox et dans le Wi-Fi.
 
 Concrètement, pour l'utilisateur : quand on joue sur un Mac depuis un autre
 appareil, un clic revient à l'écran en ~36 ms, trois fois plus que depuis un PC
 Windows relié en filaire. Le Mac compose l'image et la remet à la capture avec
 une image de retard. Son encodeur vidéo prend 10 ms par image, et le Wi-Fi
 ajoute son propre délai. Ni le plein écran ni la file de capture n'y changent
-rien. Un écran virtuel à 240 Hz ferait gagner environ 2 ms. Enfin, la page de
+rien. Un écran virtuel à 240 Hz ferait gagner environ 2 ms, mais doublerait le
+travail de capture d'un Mac souvent sur batterie : il reste à la fréquence du
+flux. Enfin, la page de
 l'hôte ouverte à son adresse en réseau local peut rester vide : un
 rechargement, ou le lien du rendez-vous, la fait venir.
