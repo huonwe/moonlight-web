@@ -2150,6 +2150,95 @@ Chrome autour de la soumission. Les leviers qui restent :
 - des images plus petites, pour l'arrivée ;
 - le bout de chaîne, puis B2.1, après la page.
 
+### 6.30 Où attend la dernière soumission : les morceaux horodatés (09/10/2026, 23:01-23:06)
+
+Le banc du §6.29, même `build\`, avec le seul bras des tranches de 16 Kio
+(relance allumée, route audio), deux passes de plus (r3 et r4). En trace
+(`mw_ultra_trace=1`), la passe GPU de chaque morceau porte désormais ses
+propres horodatages, relus avec ceux de l'image (`70326160`). Chaque morceau
+ne démarre qu'après sa propre soumission. `gpuwait.py` en tire une borne de
+plus pour recaler les deux horloges : elles se recalent à 0,11-0,12 ms près,
+au lieu de 0,38-0,40. Les deux passes ont pris le LAN direct (la même paire
+IPv6 interne qu'au §6.29). Les rapports sont dans le scratchpad (`pw120c/` :
+`pieces.py`, `backlog.py`).
+
+La dernière soumission d'une image (médianes en ms, r3 / r4) :
+
+| Étape | r3 | r4 |
+|---|---|---|
+| relais → dessin (r1-r2 du §6.29 : 6,5) | 6,60 | 7,31 |
+| soumission → fin (r1 du §6.29 : 2,9) | 2,6 | 3,3 |
+| dernière soumission → début de sa passe | 1,69-1,80 | 2,35-2,47 |
+| dont le GPU encore sur les morceaux | 1,35-1,47 | 1,89-2,00 |
+| dont le GPU libre, avant la passe finale | 0,32 | 0,33 |
+| images où le GPU travaille encore aux morceaux à la dernière soumission | 99 % | 99 % |
+
+Les morceaux sur le GPU (horloge du GPU, médianes en ms) :
+
+| Étape | r3 | r4 |
+|---|---|---|
+| passe d'un morceau | 0,054 (p90 1,02) | 0,054 (p90 1,07) |
+| le morceau lourd, 7e sur 10, arrivé à +1,5-1,6 ms | 1,24 | 1,18 |
+| chacun des neuf autres | 0,02-0,19 | 0,02-0,18 |
+| les passes des morceaux, par image | 1,82 | 1,75 |
+| début du premier → fin du dernier | 3,0 | 3,7 |
+| GPU à vide entre les morceaux, par image | 1,2 | 1,7 |
+
+De la dernière soumission à la fin du dernier morceau (horloges recalées au
+milieu de leurs bornes, médianes en ms) :
+
+| Part | r3 | r4 |
+|---|---|---|
+| l'intervalle | 1,41 | 1,94 |
+| le morceau lourd | 1,13 | 1,11 |
+| les autres morceaux | 0,09 | 0,12 |
+| le GPU à vide, un morceau pas encore arrivé | 0,14 | 0,41 |
+
+- **La dernière soumission attend le GPU, pas Chrome.** Dans 99 % des images,
+  le GPU travaille encore aux morceaux quand elle part. De ses 1,7-2,4 ms
+  d'attente, ~1,1 ms est le morceau lourd qui tourne encore, ~0,1 ms les
+  autres morceaux, et 0,15-0,4 ms le GPU à vide, faute d'un morceau que Chrome
+  ne lui a pas encore passé. Une fois le GPU libre, la passe finale démarre en
+  0,32 ms. Le coût de Chrome lui-même, entre une soumission et le GPU, n'est
+  donc qu'une petite part de l'attente.
+- **Un seul morceau porte les deux tiers du décodage.** Le 7e sur 10 prend à
+  lui seul 1,18-1,24 ms de GPU, sur les 1,75-1,82 ms des morceaux (1,77 pour
+  l'image entière au §6.29). D'après l'ordre d'envoi, c'est là que le niveau 1
+  se complète et que se débloque l'iDWT des deux niveaux les plus fins. Les
+  niveaux grossiers occupent donc ~70 % des octets de ces images. Avant lui,
+  les six premiers morceaux ne portent que ~0,5 ms de travail en 1,5 ms, et le
+  GPU attend surtout.
+- **Les morceaux s'empilent dans Chrome.** Une soumission atteint le GPU en
+  0,28 ms quand le morceau d'avant y est fini (médiane ; 0,5 en moyenne), et
+  en 0,87 ms sinon, ce qui arrive pour trois morceaux sur quatre. Le GPU les
+  enchaîne ensuite, 0,12-0,15 ms entre deux départs contre 0,2 entre deux
+  soumissions. Il reste malgré tout à vide 1,2 à 1,7 ms par image entre les
+  morceaux.
+- **Les références vides ne mesurent plus Chrome seul en tranches.** Soumises
+  à la fin d'une image, elles attendent derrière les morceaux de la suivante
+  (1,9-2,0 ms avant le départ du GPU). C'est ce que le §6.29 voyait.
+- **Les horodatages des morceaux coûtent peu.** La r3 tombe à 0,1 ms des r1-r2
+  du §6.29, du relais au dessin, et décode plus vite (2,6 ms de soumission à la
+  fin, contre 2,9). La r4 perd 0,7 ms : l'hôte rend son image plus tard (2,15
+  ms de la capture au relais), et ses morceaux mettent plus longtemps à
+  atteindre le GPU, comme la r2 de 48 Kio au §6.29.
+
+**Verdict.** Il y a moins à gagner à soumettre moins souvent : ~0,2-0,4 ms
+au mieux, le GPU à vide avant le dernier morceau. Le levier est l'iDWT : plus
+rapide, ou lancé plus tôt.
+
+- **Plus rapide** : le morceau lourd est l'iDWT des niveaux fins sur la 780M.
+  Le gain le plus proche est ~0,5-1,1 ms, et il vaut aussi pour les images
+  entières.
+- **Plus tôt** : l'iDWT du niveau 1 attend que tout le niveau soit là, vers 70
+  % des octets. L'hôte pourrait l'entrelacer par lignes comme le niveau le
+  plus fin, mais l'iDWT irait alors par bandes sur deux niveaux, et ça demande
+  l'hôte et la page.
+
+Même au mieux, ce levier n'enlève qu'~1 ms des ~4,9 ms de retard sur le HEVC
+du produit. Le plus gros poste reste l'arrivée : +2,2-2,3 ms pour 177 Ko par
+image.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
