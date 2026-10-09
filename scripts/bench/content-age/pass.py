@@ -285,7 +285,7 @@ def ultra_player(d, tag):
     player = json.loads(raw)
     print("  pyrowave p50 ms: " + ", ".join(
         "%s %s" % (k, (player.get(k) or {}).get("p50"))
-        for k in ("wait", "parse", "record", "done", "frame", "gpuDecode", "gpuPresent")), flush=True)
+        for k in ("wait", "parse", "record", "done", "frame", "gpuDecode", "gpuPresent", "spin")), flush=True)
     if player.get("traced"):
         trace = d.eval("JSON.stringify(__mwUltraPlayer.trace)")
         with open(os.path.join(age.OUT, tag + ".ultratrace.json"), "w") as f:

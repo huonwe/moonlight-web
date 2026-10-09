@@ -27,7 +27,9 @@
 //          more onSubmittedWorkDone); from nudgeAfter ms after the submit,
 //          every nudgeEvery ms (0.25), on a MessageChannel loop; nudgeTimer=1:
 //          by timeouts instead (Chrome's ~1 ms steps, no spinning), each set
-//          from a message so that nested timeouts are never held to 4 ms
+//          from a message so that nested timeouts are never held to 4 ms;
+//          player: UltraPlayer's own GpuNudge (B2.0), nudgeMode auto or all
+import { GpuNudge } from "/frontend/js/stream/ultra/GpuNudge.js";
 import { PyroWaveDecoder } from "/frontend/js/stream/ultra/PyroWaveDecoder.js";
 
 const RESOLVE_STRIDE = 256;
@@ -210,7 +212,23 @@ export async function runLab(p, log = () => {}, drawCanvas = null) {
     }
     channel.port2.postMessage(0);
   };
-  const nudgeUntil = (t1, done) => {
+  const player =
+    nudgeKind === "player"
+      ? new GpuNudge(device, p.nudgeMode === "all" ? "all" : "auto")
+      : null;
+  const nudgeUntil = (t1, done, rec) => {
+    if (player) {
+      player.begin(t1);
+      done.then(() => {
+        const w = player.end(performance.now());
+        if (w) {
+          rec.nudge = [w.from, w.first, w.nudges];
+          rec.spin = w.spin;
+          nudges += w.nudges;
+        }
+      });
+      return;
+    }
     if (!nudgeKind) return;
     const s = { next: t1 + nudgeAfter, over: false };
     nudging = s;
@@ -292,7 +310,7 @@ export async function runLab(p, log = () => {}, drawCanvas = null) {
         done = wordRead.mapAsync(GPUMapMode.READ).then(() => wordRead.unmap());
       else done = device.queue.onSubmittedWorkDone();
     } else done = device.queue.onSubmittedWorkDone();
-    nudgeUntil(t1, done);
+    nudgeUntil(t1, done, rec);
     return done.then(() => {
       rec.t2 = performance.now();
       if (mode === "decode") {
@@ -432,6 +450,8 @@ export async function runLab(p, log = () => {}, drawCanvas = null) {
             timer: nudgeTimer,
             count: nudges,
             spins,
+            mode: player ? player.mode : null,
+            timers: player ? player.stats.timers : null,
           }
         : null,
     },

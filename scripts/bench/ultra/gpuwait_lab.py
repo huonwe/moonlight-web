@@ -81,6 +81,9 @@ def brief(trace):
         out["bounds"] = q([off[id(r)][1] - off[id(r)][0] for r in sel], .5)
     if frames and refs:
         out["ref_done"] = q([r["t2"] - r["t1"] for r in refs], .5)
+    spins = [r["spin"] for r in main if "spin" in r]
+    if spins:
+        out["spin"] = q(spins, .5)
     return out
 
 
@@ -145,7 +148,7 @@ def main():
 
         print("%-22s %-28s %6s %7s %7s | %6s %6s %6s (bounds) | %-9s | %s" % (
             "case", "adapter", "i/s", "done50", "done90", "start", "gpu", "tail", "empty ref",
-            "main thread ms/frame, nudges/frame"))
+            "main thread ms/frame, nudges/frame, spin p50"))
         for name, query, rnd in order:
             url = "http://127.0.0.1:%d/scripts/bench/ultra/gpuwait-lab.html?%s" % (http_port, query)
             call("Page.navigate", url=url)
@@ -176,10 +179,10 @@ def main():
             with open(os.path.join(a.dir, run + ".json"), "w") as f:
                 json.dump(res, f, indent=1)
             fmt = lambda k: ("%6.2f" % b[k]) if b.get(k) is not None else "     -"  # noqa: E731
-            print("%-22s %-28s %6.1f %7.3f %7.3f | %s %s %s (%s) | %-9s | %5.2f %5.1f%s%s" % (
+            print("%-22s %-28s %6.1f %7.3f %7.3f | %s %s %s (%s) | %-9s | %5.2f %5.1f %s%s%s" % (
                 name + ("/%d" % rnd if a.rounds > 1 else ""), res["adapter"][:28], res["perSecond"],
                 b["done"], b["done90"], fmt("start"), fmt("gpu"), fmt("tail"), fmt("bounds").strip(),
-                fmt("ref_done").strip(), b["mainMsPerFrame"], b["nudgesPerFrame"],
+                fmt("ref_done").strip(), b["mainMsPerFrame"], b["nudgesPerFrame"], fmt("spin").strip(),
                 "" if res.get("isolated") else "  (not isolated: 0.1 ms steps)",
                 ("  errors: %s" % res["errors"][:2]) if res.get("errors") else ""))
             sys.stdout.flush()
