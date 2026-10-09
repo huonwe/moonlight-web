@@ -314,9 +314,9 @@ Ce que les leviers AW2 ont montré, et la suite :
    pas à distance.
 
 Concrètement, pour l'utilisateur : dans un jeu qui réagit vite, sans
-synchronisation verticale, l'hôte ne prend que 6 à 8 ms d'un clic en LAN
-filaire (le clic entier mesuré au banc, ~27 ms, comptait aussi la sonde et le
-transport du banc : §6). Le reste se partage entre l'encodage, le réseau, le
+synchronisation verticale, l'hôte prend 6 à 8 ms d'un clic qui en dure ~11
+en LAN filaire (§6.1 ; les ~27 ms mesurés au banc comptaient aussi la sonde et
+le transport du banc). Le reste se partage entre l'encodage, le réseau, le
 décodage et l'affichage chez le client. Jouer en plein écran ou en fenêtre ne change rien.
 Activer la synchronisation verticale dans le jeu ajoute environ une image de
 retard, ou deux selon la façon dont le jeu lit ses entrées : c'est un réglage
@@ -372,12 +372,45 @@ Hôte : moyenne des médianes et des moyennes des deux passes.
     WebGPU).
   - Une seule relecture couvre la ligne entre les trois points. Sur la RTX,
     elle coûte deux fois moins : 0,6 à 1,2 ms contre 1,3 à 2,2 en médiane
-    (micro-banc, Chrome sans fenêtre).
-- **Reste** : refaire le clic avec la sonde corrigée et en SCTP, détection
-  coupée contre allumée, quand l'UM790Pro revient sous Windows.
+    (micro-banc, Chrome sans fenêtre). Sur le 780M, elle passe de 4,7 à
+    3,2-4,3 ms seulement.
 
-Concrètement, pour l'utilisateur : rien ne change pour lui. L'« Auto » monte
-déjà le flux à 240 i/s quand le jeu va plus vite que l'écran du client, et
-l'hôte y gagne 2 à 3 ms. C'est l'outil de mesure qui change : les clics
-publiés jusqu'ici comptaient quelques millisecondes de la sonde elle-même, et
-le banc ne mesurait pas le transport du produit.
+### 6.1 La remesure en SCTP, avec la sonde corrigée (08:11)
+
+Créneau de 59, 07:52-08:10, les mêmes 8 passes, avec la vidéo en SCTP comme
+dans le produit. Les 480 clics sont datés à l'instant du dessin de leur image
+(`--from-draw` de `hostpath.py`). L'image qui montre le drapeau est celle dont
+le dessin contient cet instant. « Clic → capture » se lit sur l'horloge du
+client : c'est la montée de l'entrée plus la part de l'hôte, et la sonde n'y
+touche pas. « Capture → écran » est la médiane des images hors de la fenêtre
+de la sonde.
+
+| Cas | Clic brut p50 / moyen | Clic → capture p50 / moyen | Capture → écran | Clic estimé |
+|---|---|---|---|---|
+| tearing, détection coupée | 11,7 / 11,5 | 8,3 / 8,0 | 3,4 | 11,4 |
+| tearing, détection | 11,8 / 11,8 | 3,7 / 4,1 | 3,5 | 7,6 |
+| synchronisé, détection coupée | 12,4 / 13,2 | 8,5 / 9,1 | 4,0 | 13,1 |
+| synchronisé, détection | 15,1 / 15,6 | 7,1 / 7,8 | 3,2 | 11,0 |
+
+- **Le transport du banc coûtait 8 ms par image.** En SCTP, une image va de
+  la capture à l'écran en 3,2 à 4 ms, contre 11,7 à 12 ms sur la piste RTP.
+  Un clic brut vaut 11,5 ms au lieu de 26-27 ms.
+- **La détection fait gagner 3,9 ms en moyenne entre le clic et la
+  capture en tearing, et 1,3 ms en synchronisé.** Les images qui ne portent
+  pas de clic n'en sont pas ralenties (3,2-3,5 ms contre 3,4-4,0). Clic
+  estimé : 11,4 → 7,6 ms en tearing, 13,1 → 11,0 en synchronisé.
+- **À 240 i/s, la sonde gêne encore sur le 780M**, ce qui explique le clic
+  brut égal ou pire. Sa relecture de 3,2 à 4,3 ms tient le fil principal, et
+  la réception de l'image suivante l'attend : l'image du drapeau arrive 0,1 ms
+  après la fin de la relecture précédente, soit 5,3 ms après sa capture au
+  lieu de 2,8. Lire l'image décodée par `VideoFrame.copyTo` n'y change rien :
+  sur une image GPU, l'appel bloque le fil 3,1 ms (micro-banc, RTX). Une
+  relecture par WebGPU (`mapAsync`) serait la piste suivante. D'ici là, un
+  gain à 240 i/s se juge par cette décomposition, pas par le clic brut.
+
+Concrètement, pour l'utilisateur : rien ne change dans le produit, mais on
+sait maintenant ce qu'il vaut. En LAN filaire, avec un jeu rapide et le flux
+du produit (SCTP), un clic met environ 11 ms à revenir à l'écran du client, et
+l'« Auto » détecté le ramène vers 7,5 ms en montant le flux à 240 i/s. Les
+deux tiers de ce temps sont côté hôte, entre l'entrée injectée et l'image
+capturée : c'est là que les leviers suivants doivent chercher.
