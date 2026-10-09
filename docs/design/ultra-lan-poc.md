@@ -1985,6 +1985,66 @@ Le labo du §6.25 (`gpuwait_lab.py`, `nudge=player`, `a5086ee6`) fait tourner
   `mw_ultra_nudge=1`, jugées au clic et à l'hôte → dessin ;
 - puis le bout de chaîne, sur l'écran du client.
 
+### 6.28 La relance sur le câble, à 120 i/s (09/10/2026, 20:27-20:40)
+
+Le banc du §6.26, avec trois bras en ABCCBA (deux passes de 60 clics par bras) :
+
+- le HEVC du produit par SCTP, en témoin ;
+- PyroWave par SCTP sans relance (`mw_ultra_nudge=0`) ;
+- PyroWave par SCTP avec relance (`mw_ultra_nudge=1`, donc `auto`).
+
+Les six passes ont pris le LAN direct (paires IPv6 internes, RTT de la synchro
+0,5-0,7 ms). Le lanceur et les rapports sont dans le scratchpad (`pw120c/` :
+`run-nudge.sh`, `report.py`, `player.py`, `pwlegs.py`).
+
+Au clic et hors sonde, comme au §6.26. Médiane / moyenne en ms, 120 clics par
+bras, ~11 500 images hors sonde.
+
+| Bras | Clic | Clic → capture | Capture → dessin (clic) | Hors sonde |
+|---|---|---|---|---|
+| HEVC, SCTP (le produit) | 10,5 / 10,3 | 6,7 / 6,4 | 3,9 / 3,9 | 3,7 / 3,8 |
+| PyroWave, SCTP, sans relance | 18,6 / 18,9 | 5,7 / 6,1 | 12,9 / 12,8 | 11,1 / 11,2 |
+| PyroWave, SCTP, avec relance | 16,0 / 17,5 | 4,4 / 5,9 | 11,1 / 11,5 | 10,1 / 10,6 |
+
+Les étapes de chaque passe, sur toutes ses images (journal des images de la
+page, horloge du client). Médianes en ms.
+
+| Passe | Capture → arrivée | Arrivée → décodée | Décodée → dessinée | Capture → dessin | Octets par image |
+|---|---|---|---|---|---|
+| HEVC r1 / r2 | 3,2 / 2,95 | 0,4 / 0,4 | 0,2 / 0,2 | 3,9 / 3,6 | ~170 |
+| PyroWave sans relance r1 / r2 | 6,05 / 5,2 | 5,1 / 5,0 | 0,2 / 0,2 | 11,7 / 10,7 | 177 000 |
+| PyroWave avec relance r1 / r2 | 5,8 / 6,05 | 4,1 / 3,6 | 0,2 / 0,2 | 10,1 / 10,3 | 177 000 |
+
+- **La relance tient sur le câble : −1,2 ms de décodage par image** (5,0-5,1 →
+  3,6-4,1 ; soumission → fin du lecteur 4,7-4,8 → 3,3-3,8). Le §6.27
+  attendait 1,5 à 2 ms. Par image, de la capture au dessin, le gain se lit
+  −1,0 ms en médiane et −0,7 en moyenne : l'arrivée varie de ±0,4 ms d'une
+  passe à l'autre, avec l'hôte.
+- **Le clic suit** : −1,3 ms de la capture au dessin en moyenne. Le clic
+  entier gagne 1,4 ms en moyenne, mais son clic → capture tient au hasard de
+  la phase.
+- **Le coût est celui prévu** : la boucle tourne 3,3-3,6 ms par image, ~40 %
+  d'un cœur du client à 120 i/s. `auto` y vaut presque `all` : 13 soumissions
+  vides par image, une minuterie pour 7 à 9 % des images seulement. Aucun clic
+  perdu, aucune image incomplète ni en erreur. Avec ou sans relance, 1 à 8
+  images par passe ont été remplacées par une plus récente avant leur
+  décodage.
+- **PyroWave reste ~6,4 ms derrière le HEVC du produit** (10,1 contre 3,7
+  hors sonde). L'écart a deux moitiés :
+  - **L'arrivée, +2,7 ms.** Chaque image PyroWave fait 177 Ko, soit ~1,4 ms de
+    fil à 1 Gbit/s plus SCTP. Le HEVC envoie ~170 octets sur cette scène presque
+    fixe ; en jeu, ses images grossiraient et l'écart baisserait un peu.
+  - **Le décodage, +3,2-3,7 ms** sur le 780M, contre 0,4 ms au décodeur matériel.
+- **Le dessin ne pèse que 0,2 ms** dans la page, avec ou sans relance. Ce que
+  B2.1 (présenter par le canevas WebGPU) peut gagner se trouve donc après la
+  page, dans le compositeur : seul le bout de chaîne le montrera.
+
+**Verdict.** La relance est un vrai gain, mais elle ne retourne pas celui du
+§6.26. Les deux leviers qui restent sont plus gros que B2.1 :
+
+- les tranches, pour décoder pendant que l'image arrive ;
+- un iDWT plus rapide, ou des images plus petites.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
