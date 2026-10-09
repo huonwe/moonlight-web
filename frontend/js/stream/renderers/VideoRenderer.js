@@ -108,6 +108,15 @@ export class VideoRenderer {
     get probePixels() {
         return undefined;
     }
+    /**
+     * When the frame `probePixels` was read from went to the canvas
+     * (performance.now()), or null. The read itself is a GPU round trip, 4-5 ms
+     * on the 780M (09/10/2026): the probe dates the flag from here, not from
+     * the end of the read, so its own cost stays out of the click it measures.
+     */
+    get probeDrawnAt() {
+        return null;
+    }
 
     /**
      * Draw one VideoFrame and CLOSE it (always, even on error). Returns a

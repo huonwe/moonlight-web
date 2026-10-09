@@ -57,6 +57,7 @@ export class Canvas2DRenderer extends VideoRenderer {
         /** Click-to-photon probe: read the flag pixels after each draw. */
         this._probeActive = false;
         this._probePixels = null;
+        this._probeDrawnAt = null;
     }
 
     /**
@@ -64,28 +65,41 @@ export class Canvas2DRenderer extends VideoRenderer {
      * cannot be sampled with drawImage from outside either, so the three flag
      * pixels are read with getImageData right after the draw while a
      * measurement is on (a GPU readback, paid only during the probe).
+     *
+     * One read of the row between them, not three of a pixel: each read is a
+     * round trip to the GPU process, and three cost 4-5 ms a frame on the
+     * 780M (09/10/2026) — at 240 frames a second, more than a frame's time,
+     * so the frames behind it piled up and the probe slowed the very click it
+     * measured. One costs about half.
      */
     set probeActive(on) {
         this._probeActive = !!on;
         this._probePixels = null;
+        this._probeDrawnAt = null;
     }
     get probePixels() {
         return this._probePixels;
+    }
+    get probeDrawnAt() {
+        return this._probeDrawnAt;
     }
 
     _readProbePixels() {
         const w = this.canvas.width,
             h = this.canvas.height;
         if (!(w > 0 && h > 0)) return;
+        const drawnAt = performance.now();
         try {
-            const px = new Uint8ClampedArray(12);
             const y = Math.min(h - 1, Math.floor(h * 0.025));
-            const xs = [0.465, 0.505, 0.545];
+            const xs = [0.465, 0.505, 0.545].map((f) => Math.min(w - 1, Math.floor(w * f)));
+            const row = this.ctx.getImageData(xs[0], y, xs[2] - xs[0] + 1, 1).data;
+            const px = new Uint8ClampedArray(12);
             for (let i = 0; i < 3; i++) {
-                const x = Math.min(w - 1, Math.floor(w * xs[i]));
-                px.set(this.ctx.getImageData(x, y, 1, 1).data, i * 4);
+                const at = (xs[i] - xs[0]) * 4;
+                px.set(row.subarray(at, at + 4), i * 4);
             }
             this._probePixels = px;
+            this._probeDrawnAt = drawnAt;
         } catch (e) {}
     }
 

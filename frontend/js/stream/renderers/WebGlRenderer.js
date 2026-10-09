@@ -606,6 +606,7 @@ export class WebGlRenderer extends VideoRenderer {
         /** Click-to-photon probe: read the flag pixels after each draw. */
         this._probeActive = false;
         this._probePixels = null;
+        this._probeDrawnAt = null;
         /**
          * GPU lag, see takeGpuBehind(): the fence set after the last draw, when
          * it was set, and the draws counted since the last read.
@@ -666,30 +667,39 @@ export class WebGlRenderer extends VideoRenderer {
      * See VideoRenderer.probeActive. A desynchronized WebGL2 canvas cannot be
      * sampled with drawImage once presented, so while a measurement is on the
      * three flag pixels are read with readPixels at the end of draw() — a
-     * synchronous GPU round trip, paid only during the 200 ms of a probe.
+     * synchronous GPU round trip, paid only during the 200 ms of a probe. One
+     * read of the row between the three, not three reads (see
+     * Canvas2DRenderer.probeActive).
      */
     set probeActive(on) {
         this._probeActive = !!on;
         this._probePixels = null;
+        this._probeDrawnAt = null;
     }
     get probePixels() {
         return this._probePixels;
     }
+    get probeDrawnAt() {
+        return this._probeDrawnAt;
+    }
 
     _readProbePixels(cw, ch) {
         const gl = this.gl;
-        const px = new Uint8ClampedArray(12);
-        const one = new Uint8Array(4);
+        const drawnAt = performance.now();
         // Same spots as LatencyProbe: 46.5 %, 50.5 %, 54.5 % of the width,
         // 2.5 % from the top (GL rows count from the bottom).
         const y = Math.min(ch - 1, Math.max(0, ch - 1 - Math.floor(ch * 0.025)));
-        const xs = [0.465, 0.505, 0.545];
+        const xs = [0.465, 0.505, 0.545].map((f) => Math.min(cw - 1, Math.floor(cw * f)));
+        const n = xs[2] - xs[0] + 1;
+        const row = new Uint8Array(n * 4);
+        gl.readPixels(xs[0], y, n, 1, gl.RGBA, gl.UNSIGNED_BYTE, row);
+        const px = new Uint8ClampedArray(12);
         for (let i = 0; i < 3; i++) {
-            const x = Math.min(cw - 1, Math.floor(cw * xs[i]));
-            gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, one);
-            px.set(one, i * 4);
+            const at = (xs[i] - xs[0]) * 4;
+            px.set(row.subarray(at, at + 4), i * 4);
         }
         this._probePixels = px;
+        this._probeDrawnAt = drawnAt;
     }
 
     /**

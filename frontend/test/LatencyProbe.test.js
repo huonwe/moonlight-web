@@ -398,6 +398,50 @@ describe('LatencyProbe.run', () => {
         expect(entry.via).toBeUndefined();
     });
 
+    it("dates the flag from the renderer's draw, not from the end of its read", async () => {
+        // The read is a GPU round trip of a few ms (09/10/2026, 780M): the
+        // probe must not count its own cost in the click.
+        const flag = px([0, 0, 255], [255, 255, 255], [255, 0, 0]);
+        const grey = px([140, 140, 140], [140, 140, 140], [140, 140, 140]);
+        let shown = grey;
+        let drawnAt = 500; // a read from before the click
+        const probe = new LatencyProbe({
+            source: () => ({}),
+            sendClick: vi.fn(),
+            samplePixels: () => shown,
+            pixelsDrawnAt: () => drawnAt,
+        });
+        const p = probe.measureOnce();
+        await tick(10);
+        // A frame drawn 22 ms after the click, read and seen 5 ms later.
+        shown = flag;
+        drawnAt = now + 12;
+        now += 17;
+        probe.onFramePresented();
+        const entry = await p;
+        expect(entry.ok).toBe(true);
+        expect(entry.latencyMs).toBe(22);
+    });
+
+    it("keeps the moment it saw the flag when the renderer's stamp is stale", async () => {
+        const flag = px([0, 0, 255], [255, 255, 255], [255, 0, 0]);
+        const grey = px([140, 140, 140], [140, 140, 140], [140, 140, 140]);
+        let shown = grey;
+        const probe = new LatencyProbe({
+            source: () => ({}),
+            sendClick: vi.fn(),
+            samplePixels: () => shown,
+            pixelsDrawnAt: () => 500,
+        });
+        const p = probe.measureOnce();
+        await tick(10);
+        shown = flag;
+        now += 20;
+        probe.onFramePresented();
+        const entry = await p;
+        expect(entry.latencyMs).toBe(30);
+    });
+
     it('records nothing usable when there is no picture to sample', async () => {
         const probe = new LatencyProbe({ source: () => null, sendClick: vi.fn() });
         const entry = await probe.measureOnce();

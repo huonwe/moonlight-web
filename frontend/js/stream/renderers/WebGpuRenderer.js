@@ -890,6 +890,8 @@ export class WebGpuRenderer extends VideoRenderer {
         /** Click-to-photon probe: three canvas texels copied out per frame. */
         this._probeActive = false;
         this._probePixels = null;
+        this._probeDrawnAt = null;
+        this._probeQueuedAt = 0;
         this._probeBuf = null;
         this._probeBusy = false;
         /** @type {boolean} HDR→SDR tone-map path (exclusive with _hdr). */
@@ -1011,14 +1013,20 @@ export class WebGpuRenderer extends VideoRenderer {
      * probe's three texels from the canvas texture into a mappable buffer
      * (before submit) and maps it afterwards; the probe polls `probePixels`.
      * The HDR float canvas is read too: its half floats are clamped to 0..1 and
-     * scaled to 8 bits, which is all the flag test needs.
+     * scaled to 8 bits, which is all the flag test needs. The pixels come
+     * back after the map, a few ms later; `probeDrawnAt` is the submit of the
+     * frame they were copied from.
      */
     set probeActive(on) {
         this._probeActive = !!on;
         this._probePixels = null;
+        this._probeDrawnAt = null;
     }
     get probePixels() {
         return this._probePixels;
+    }
+    get probeDrawnAt() {
+        return this._probeDrawnAt;
     }
 
     _queueProbeRead(encoder, texture, cw, ch) {
@@ -1044,11 +1052,13 @@ export class WebGpuRenderer extends VideoRenderer {
             );
         }
         this._probeBusy = true;
+        this._probeQueuedAt = performance.now();
         return true;
     }
 
     _mapProbeRead() {
         const buf = this._probeBuf;
+        const drawnAt = this._probeQueuedAt;
         const bgra = this._format === 'bgra8unorm';
         const half = this._format === 'rgba16float';
         // IEEE half → float, enough for a clamped 0..1 read (no NaN/Inf care).
@@ -1079,7 +1089,10 @@ export class WebGpuRenderer extends VideoRenderer {
                     px[i * 4 + 3] = 255;
                 }
                 buf.unmap();
-                if (this._probeActive) this._probePixels = px;
+                if (this._probeActive) {
+                    this._probePixels = px;
+                    this._probeDrawnAt = drawnAt;
+                }
             })
             .catch(() => {})
             .finally(() => {

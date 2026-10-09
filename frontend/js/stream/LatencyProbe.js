@@ -176,6 +176,10 @@ export class LatencyProbe {
      *        canvas; `null` = armed but no frame drawn yet; else 12 RGBA values.
      * @param {((on: boolean) => void)|null} [deps.setProbing] arm/disarm that
      *        renderer-side read around each measurement.
+     * @param {(() => (number|null))|null} [deps.pixelsDrawnAt] when the frame
+     *        those pixels were read from went to the canvas (performance.now(),
+     *        VideoRenderer.probeDrawnAt). A flag is dated from there rather
+     *        than from the moment it was seen, which comes after the read.
      * @param {(() => string)|null} [deps.describeSource] what is being
      *        sampled, for a failed measurement to name (renderer kind and
      *        surface size). Never called while nothing is being measured.
@@ -190,9 +194,13 @@ export class LatencyProbe {
         results = [],
         samplePixels = null,
         setProbing = null,
+        pixelsDrawnAt = null,
         describeSource = null,
         uplink = null,
     }) {
+        this._pixelsDrawnAt = pixelsDrawnAt;
+        /** When the frame of the last renderer read was drawn, or null. */
+        this._lastDrawnAt = null;
         this._uplink = uplink;
         /** Host answers by click ts, for an entry recorded after its answer. */
         this._splits = new Map();
@@ -375,7 +383,11 @@ export class LatencyProbe {
         const now = performance.now();
         const hit = this._sample();
         if (hit) {
-            this._finish(now, null);
+            // The frame's own draw, when the renderer read it: the read, a
+            // GPU round trip of a few ms, is the probe's cost, not the
+            // stream's. A stamp from before the click is not this frame's.
+            const at = this._lastVia === 'renderer' ? this._lastDrawnAt : null;
+            this._finish(typeof at === 'number' && at >= p.t0 && at <= now ? at : now, null);
         } else if (now - p.t0 > (this._timeoutMs || FLAG_TIMEOUT_MS)) {
             this._finish(null, 'timeout');
         }
@@ -454,6 +466,7 @@ export class LatencyProbe {
             if (px !== undefined) {
                 this._lastPx = px;
                 this._lastVia = 'renderer';
+                this._lastDrawnAt = this._pixelsDrawnAt ? this._pixelsDrawnAt() : null;
                 return looksLikeFlag(px);
             }
         }

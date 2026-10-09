@@ -10163,6 +10163,7 @@ export class StreamView {
             // Renderers whose canvas cannot be read once presented (WebGL2,
             // desynchronized) hand the probe their own pixel read instead.
             samplePixels: () => (this._renderer ? this._renderer.probePixels : undefined),
+            pixelsDrawnAt: () => (this._renderer ? this._renderer.probeDrawnAt : null),
             setProbing: (on) => {
                 if (this._renderer) this._renderer.probeActive = on;
             },
