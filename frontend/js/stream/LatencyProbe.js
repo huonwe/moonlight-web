@@ -67,6 +67,16 @@ export const FLAG_REGION = Object.freeze({ left: 0.44, right: 0.56, top: 0.0, bo
 /** Past this, the flag is assumed lost (network hiccup) and the sample dropped. */
 export const FLAG_TIMEOUT_MS = 200;
 
+/**
+ * A click waits up to this long, at random, before it leaves. It would leave
+ * right after a picture was sampled, and pictures come at the host's refresh:
+ * every click then reaches the host at the same phase of that refresh, and a
+ * wait that depends on the phase is measured at that one phase only
+ * (09/10/2026, a Linux host's screen at 60 Hz: nine clicks in ten 1.5-2 ms
+ * before its vblank). A refresh at 40 Hz or faster is covered whole.
+ */
+const PHASE_JITTER_MS = 25;
+
 /** Output surface is scaled into this many columns × rows for sampling. */
 const SAMPLE_W = 100;
 const SAMPLE_H = 20;
@@ -330,6 +340,7 @@ export class LatencyProbe {
                 return this._record(null, null, null, false, 'flag already up');
             }
         }
+        await new Promise((r) => setTimeout(r, Math.random() * PHASE_JITTER_MS));
 
         return new Promise((resolve) => {
             const t0 = performance.now();

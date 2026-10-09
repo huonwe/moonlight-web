@@ -423,9 +423,11 @@ def main():
             os.environ["MW_BENCH_CONTENT_RECT"] = "%s,%s,%s,%s" % (x, y, w, h)
             print("virtual display", " ".join(vdd[0]), flush=True)
         target = None
-        if a.hold > 0 and a.target == "vdisplay" and os.environ.get("MW_BENCH_CLICK_TARGET") and rh:
+        if a.hold > 0 and os.environ.get("MW_BENCH_CLICK_TARGET") and rh:
             # The same on a remote host (plan « attente », AM0): the tool's
-            # path is the host's, its log fetched at the end.
+            # path is the host's, its log fetched at the end. A physical
+            # display too (AL0, KMS): the host's tool finds its screen itself
+            # (MW_BENCH_CLICK_TARGET_DISPLAY on Linux).
             print("  " + rh.click_target_start(
                 a.tag, int(a.hold) + 300, os.environ["MW_BENCH_CLICK_TARGET"],
                 os.environ.get("MW_BENCH_CLICK_TARGET_ARGS", "").split()), flush=True)
