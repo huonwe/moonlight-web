@@ -195,6 +195,8 @@ export class LatencyProbe {
      *        surface size). Never called while nothing is being measured.
      * @param {import('./InputUplink.js').InputUplink|null} [deps.uplink] splits
      *        each click into its way up and the rest (plan radios, T7).
+     * @param {number} [deps.phaseJitterMs] how long a click may wait at random
+     *        before it leaves (PHASE_JITTER_MS); 0 sends it at once.
      */
     constructor({
         source,
@@ -207,7 +209,9 @@ export class LatencyProbe {
         pixelsDrawnAt = null,
         describeSource = null,
         uplink = null,
+        phaseJitterMs = PHASE_JITTER_MS,
     }) {
+        this._phaseJitterMs = phaseJitterMs;
         this._pixelsDrawnAt = pixelsDrawnAt;
         /** When the frame of the last renderer read was drawn, or null. */
         this._lastDrawnAt = null;
@@ -340,7 +344,8 @@ export class LatencyProbe {
                 return this._record(null, null, null, false, 'flag already up');
             }
         }
-        await new Promise((r) => setTimeout(r, Math.random() * PHASE_JITTER_MS));
+        if (this._phaseJitterMs > 0)
+            await new Promise((r) => setTimeout(r, Math.random() * this._phaseJitterMs));
 
         return new Promise((resolve) => {
             const t0 = performance.now();
