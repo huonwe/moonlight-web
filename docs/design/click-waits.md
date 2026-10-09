@@ -596,6 +596,28 @@ requêtes passent par le tunnel : elle s'ouvre du premier coup. Le banc est
 passé par là pour toutes les passes après 13:40. Le défaut est versé à la liste
 du plan natif (§9).
 
+#### 8.5.1 Le correctif : une connexion garde la suivante
+
+Le serveur garde désormais la connexion ouverte entre deux requêtes
+(`Connection: keep-alive`, fermée après 15 s sans requête), sauf si le
+client demande la fermeture ou parle HTTP/1.0. Un chargement de la page dans
+Chrome passe de 126 connexions TCP pour 122 requêtes (version installée) à 17
+pour 160.
+
+Pour le mesurer sur le Wi-Fi du Mac sans nouveau `.pkg`, un proxy TLS jetable
+en Python, posé sur le Mac, parlait en keep-alive avec Chrome et relayait en
+local vers la DEV. Le test : 20 paires alternées depuis un Chrome headless de
+DualRTX, avec un contexte neuf et le cache coupé à chaque chargement.
+
+| Chemin | Connexions | Chargements bloqués à 20 s | Chargement complet |
+|---|---|---|---|
+| Direct (`Connection: close`) | ~128 | 16 sur 20 | — |
+| Keep-alive (proxy) | 14 | 0 sur 20 | 1,3 s (médiane) |
+
+Les requêtes bloquées sont toujours des modules JavaScript, dont la connexion
+ne s'ouvre pas. La validation sur la DEV Mac elle-même attend un `.pkg` qui
+porte le correctif.
+
 **Bilan de macOS.** Sur un Mac en Wi-Fi, un clic vaut ~36 ms. L'hôte en garde
 16-17 :
 - 2-3 ms pour remettre l'entrée à l'appli ;
