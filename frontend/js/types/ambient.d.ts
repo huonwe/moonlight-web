@@ -141,6 +141,8 @@ interface Window {
     mwLatency?: import('../stream/LatencyProbe.js').LatencyProbe | null;
     /** Every click-to-photon entry measured in this page, in order. */
     mwLatencyResults?: any[];
+    /** Set by app.js once its whole module graph ran; read by bootWatch.js. */
+    mwBooted?: boolean;
 }
 
 interface TouchEvent {

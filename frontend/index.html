@@ -123,6 +123,9 @@
             </footer>
         </div>
 
+        <!-- First, and owing nothing to the module graph: if a file of it never
+             arrives, it reloads once, then says so (js/bootWatch.js). -->
+        <script async src="/js/bootWatch.js?v=__MW_VERSION__"></script>
         <script type="module" src="/js/app.js?v=__MW_VERSION__"></script>
     </body>
 </html>

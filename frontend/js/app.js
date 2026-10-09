@@ -122,6 +122,9 @@ import {
     rememberInstance,
 } from './util/instances.js';
 
+// Every module above arrived and ran: the boot watchdog (bootWatch.js) stands down.
+window.mwBooted = true;
+
 // ── Global error handler ──────────────────────────────────────────────────────
 window.addEventListener('error', (evt) => {
     console.error('[MW] Uncaught error:', evt.error || evt.message, evt);
