@@ -7,9 +7,9 @@
 # on the clock MoonlightWeb stamps with. What a game adds to the click's way
 # through the host is then the game's own, not the bench's.
 #
-# Windows today (D3D12, flip model, tearing allowed); Linux (Vulkan on Wayland)
-# and macOS (Metal) are the plan's next steps, on the same options and log.
-# Nothing but cleared rectangles is drawn: no shader.
+# Windows (D3D12, flip model, tearing allowed) and macOS (Metal, a
+# CAMetalLayer); Linux (Vulkan on Wayland) is the plan's next step, on the same
+# options and log. Nothing but cleared or copied rectangles is drawn: no shader.
 #
 # Built on demand with -DMW_BUILD_TOOLS=ON, never installed nor shipped. It
 # also configures on its own: `cmake -S backend/native-host/tools/click-target`.
@@ -17,11 +17,25 @@
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 3.21)
-    project(mw-click-target LANGUAGES CXX)
+    if(APPLE)
+        project(mw-click-target LANGUAGES CXX OBJCXX)
+    else()
+        project(mw-click-target LANGUAGES CXX)
+    endif()
+endif()
+
+if(APPLE)
+    add_executable(mw-click-target src/main.cpp src/ClickTargetMac.mm)
+    target_compile_features(mw-click-target PRIVATE cxx_std_17)
+    target_compile_options(mw-click-target PRIVATE -Wall -Wextra
+                                                   $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_link_libraries(mw-click-target PRIVATE "-framework AppKit" "-framework Metal"
+                                                  "-framework QuartzCore" "-framework CoreGraphics")
+    return()
 endif()
 
 if(NOT WIN32)
-    message(STATUS "mw-click-target skipped: Windows only for now")
+    message(STATUS "mw-click-target skipped: Windows and macOS only for now")
     return()
 endif()
 

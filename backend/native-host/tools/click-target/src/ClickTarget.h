@@ -30,8 +30,8 @@
 // when the OS says the picture reached the screen.
 //
 // One renderer per OS, each with the API a game there would use: D3D12 on
-// Windows (ClickTargetWin.cpp). Linux (Vulkan) and macOS (Metal) follow the
-// same Options and the same log.
+// Windows (ClickTargetWin.cpp), Metal on macOS (ClickTargetMac.mm). Linux
+// (Vulkan) follows the same Options and the same log.
 namespace clicktarget {
 
 /// The flag, as fractions of the screen: LatencyFlag::kLeft..kBottom.
@@ -50,6 +50,9 @@ struct Options
     /// Covering the whole screen (the OS may then let it skip composition),
     /// or a window over the top 90 % of it (always composed).
     bool fullscreen = true;
+    /// macOS: full screen in a Space of its own, as a game's full-screen mode
+    /// goes, rather than a borderless window over the desktop's Space.
+    bool fullscreenSpace = false;
     /// Present synchronised to the screen's refresh (1), or at once (0).
     int syncInterval = 0;
     /// With syncInterval 0, let the picture tear rather than wait.
@@ -75,8 +78,9 @@ struct Options
 };
 
 /// A microsecond count on the OS's monotonic clock — on Windows the
-/// QueryPerformanceCounter that every MoonlightWeb stamp uses, so this log
-/// lines up with the host's click trace.
+/// QueryPerformanceCounter that every MoonlightWeb stamp uses, on macOS the
+/// monotonic clock that ticks with mach time — so this log lines up with the
+/// host's click trace.
 inline int64_t steadyNowUs()
 {
     return std::chrono::duration_cast<std::chrono::microseconds>(

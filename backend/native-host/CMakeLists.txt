@@ -652,6 +652,7 @@ if(MW_BUILD_TOOLS AND WIN32)
 endif()
 if(MW_BUILD_TOOLS AND APPLE)
     add_subdirectory(tools/mouse-accel-probe)
+    add_subdirectory(tools/click-target)
 endif()
 # Linux: what the Vulkan Video chain of Phase 13 can count on, asked first.
 if(MW_BUILD_TOOLS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")

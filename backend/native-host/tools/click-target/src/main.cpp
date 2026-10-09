@@ -28,6 +28,7 @@ const char* kUsage =
     "\n"
     "  --display <n|name>   the screen: 0 the first, or \\\\.\\DISPLAY5 (default: primary)\n"
     "  --window             a window over the top 90% of the screen (default: covering it)\n"
+    "  --space              macOS: full screen in a Space of its own\n"
     "  --sync 0|1           present at once (0, default) or on the refresh (1)\n"
     "  --no-tearing         with --sync 0, wait for the refresh rather than tear\n"
     "  --on-click           draw only when the flag changes (default: continuously)\n"
@@ -42,7 +43,8 @@ const char* kUsage =
     "  --out <file>         the log, one JSON object a line (default: stdout)\n"
     "\n"
     "Each click: {\"click\", \"downUs\", \"renderUs\", \"presentCallUs\", \"presentUs\",\n"
-    "\"presentId\", \"displayedUs\"}, on the steady clock MoonlightWeb stamps with.\n";
+    "\"presentId\", \"displayedUs\"} (macOS: and \"eventUs\"), on the steady clock\n"
+    "MoonlightWeb stamps with.\n";
 
 bool takeInt(const char* s, int& out, int lo, int hi)
 {
@@ -66,6 +68,8 @@ int main(int argc, char** argv)
             o.display = argv[++i];
         } else if (a == "--window") {
             o.fullscreen = false;
+        } else if (a == "--space") {
+            o.fullscreenSpace = true;
         } else if (a == "--sync" && next) {
             ok = takeInt(argv[++i], o.syncInterval, 0, 1);
         } else if (a == "--no-tearing") {
