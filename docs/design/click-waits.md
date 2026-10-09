@@ -189,6 +189,11 @@ Même banc : DualRTX en `--dev`, la RTX encode, client UM790Pro en câble, flux
 HEVC à 120 i/s, DDA. L'écran virtuel en 1920×1080, à 120 ou 240 Hz
 (`MW_VDD_REFRESH`). `presentmon.py` lit PresentMon à côté de chaque passe.
 
+240 Hz est la fréquence du produit sous Windows depuis le 30/09 (`03c189ea`,
+décision A du plan framerate-hote) ; les 120 Hz des bancs 1 et A1 étaient
+forcés. Le flux, lui, restait fixé à 120 i/s, détection de l'« Auto » coupée
+(`mw_autostep=0`), alors que le produit l'allume par défaut (§4.1).
+
 ### 4.1 AW2.1 : l'écran virtuel à 240 Hz
 
 `mw-click-target` en fenêtre, 120 clics par case (deux passes, ordre ABBA) :
@@ -210,6 +215,14 @@ HEVC à 120 i/s, DDA. L'écran virtuel en 1920×1080, à 120 ou 240 Hz
   composition sur deux n'est pas transportée, et le drapeau attend souvent la
   suivante (`late=1`, `between=1`). Il ne reste qu'un gain en queue : l'hôte
   passe de 16,3 à 11,4 ms au p90, et le clic gagne 0,8 ms en moyenne.
+- **Ce frein vient du flux fixé par le banc.** La porte (`FrameCadence`),
+  rejouée sur les captures de chaque passe (mêmes comptes que son journal),
+  écarte 49 % des présentations de l'outil à 240 Hz, soit 2,1 ms de plus en
+  moyenne pour un instant quelconque ; 15 % et 1,0 ms à 120 Hz (grille de
+  144). Sur un client qui déchire, le produit monte le flux à 240 i/s dès que
+  le contenu va plus vite (« Auto » détecté, Phase UA du POC Ultra, par défaut
+  depuis le 02/10) : la porte devient un plafond et n'écarte plus rien. Le
+  clic avec la détection allumée reste à mesurer (§5).
 - **En synchronisé, 240 Hz gagne 3,3 ms en médiane et 10 ms au p90.**
   L'application suit l'écran virtuel et tourne à 240 i/s : c'est sa propre
   attente qui raccourcit, pas celle de l'hôte.
@@ -227,6 +240,9 @@ coupé. Le jeu seul, sans clic, sur ~83 s de scène :
 
 - **L'écran virtuel à 240 Hz ne coûte pas d'images au jeu.** Cela répond à la
   question du 30/09 (plan framerate-hote, décision A), restée sans mesure.
+- La porte du flux à 120 i/s n'écarte aucune image du jeu pendant la scène :
+  à 77 i/s, il va moins vite que le flux. Les 11 par seconde « not carried »
+  du journal viennent des logos et des menus.
 - L'échec du 30/09, où la capture ne voyait que 3 à 7 images par seconde, ne
   revient pas. Deux choses ont changé : la fenêtre tient désormais dans
   l'écran virtuel (1936×1119 auparavant, sur 1920×1080), et elle est au premier
@@ -282,13 +298,15 @@ celle de l'hôte.
 Ce que les leviers AW2 ont montré, et la suite :
 
 1. **AW2.1 (écran virtuel à 240 Hz)** : un gain pour les jeux synchronisés,
-   presque rien pour les autres, et aucun coût vu. Le passer au défaut est
-   une décision produit, avec le plan framerate-hote.
-2. **Le cadencement du flux** freine le gain : à 240 Hz, une composition sur
-   deux attend la tranche suivante. Piste : laisser encoder sans attendre une
-   présentation arrivée en cours de tranche, quand le codeur est libre. Les
-   modes `host` du plan framerate-hote s'en approchent. C'est le prochain
-   levier à mesurer, avant AW2.2.
+   presque rien pour les autres à flux fixe, et aucun coût vu. C'est déjà la
+   fréquence du produit sous Windows (`03c189ea`) : le banc 2 apporte les deux
+   mesures qui manquaient à la décision A du plan framerate-hote, le clic et
+   RE9. Reste le ressenti de Bruno.
+2. **Le cadencement du flux** : à 240 Hz et à flux fixe, une présentation sur
+   deux attend la tranche suivante. Le produit lève déjà ce frein par la
+   détection de l'« Auto », que le banc coupait ; rien à coder. Mesurée au
+   §6 : l'hôte y gagne 2 à 3 ms, mais le clic reste à refaire avec la sonde
+   corrigée et en SCTP, avant AW2.2.
 3. **L'encodage sous un vrai jeu** se mesure avec le produit installé
    (REALTIME), pas avec la `--dev`.
 4. L'écran virtuel seul, sans écran physique allumé, n'a pas été essayé : il
@@ -296,15 +314,70 @@ Ce que les leviers AW2 ont montré, et la suite :
    pas à distance.
 
 Concrètement, pour l'utilisateur : dans un jeu qui réagit vite, sans
-synchronisation verticale, l'hôte ne prend qu'environ un quart d'un clic en
-LAN filaire. Le reste se partage entre l'encodage, le réseau, le décodage et
-l'affichage chez le client. Jouer en plein écran ou en fenêtre ne change rien.
+synchronisation verticale, l'hôte ne prend que 6 à 8 ms d'un clic en LAN
+filaire (le clic entier mesuré au banc, ~27 ms, comptait aussi la sonde et le
+transport du banc : §6). Le reste se partage entre l'encodage, le réseau, le
+décodage et l'affichage chez le client. Jouer en plein écran ou en fenêtre ne change rien.
 Activer la synchronisation verticale dans le jeu ajoute environ une image de
 retard, ou deux selon la façon dont le jeu lit ses entrées : c'est un réglage
-du jeu, pas de MoonlightWeb. Un écran virtuel à 240 Hz la réduit (3 ms de
-moins au clic, 10 ms de moins dans les pires cas) sans coûter d'images au jeu.
+du jeu, pas de MoonlightWeb. L'écran virtuel du produit, à 240 Hz, la réduit
+(3 ms de moins au clic, 10 ms de moins dans les pires cas) sans coûter
+d'images au jeu.
 Quand le jeu pousse le GPU à fond, un clic coûte ~2 ms de plus côté hôte.
 
 Pour le poste B, les hypothèses B1 se resserrent sur l'aller-retour de Chrome :
 présenter par le canevas WebGPU sans `onSubmittedWorkDone` (B2.1) devient le
 premier levier à essayer.
+
+## 6. Le cadencement du flux, et la sonde qui se mesurait elle-même (09/10/2026)
+
+Créneau de 59, 07:26-07:44. Même banc qu'au §4 : l'écran virtuel du produit à
+240 Hz, `mw-click-target` en fenêtre, 60 clics par passe, deux passes par case
+(ABBA). Le flux est en « Auto » (120 i/s, la fréquence du client), avec la
+détection coupée ou allumée (`pass.py --autostep`, le défaut du produit).
+Hôte : moyenne des médianes et des moyennes des deux passes.
+
+| Cas | Flux | Hôte p50 / moyen | Clic p50 / p90 / moyen, sonde d'avant |
+|---|---|---|---|
+| tearing, détection coupée | 120 i/s, 111 présentations/s écartées | 7,2 / 7,0 | 27,0 / 30,4 / 26,0 |
+| tearing, détection | 240 i/s, aucune écartée | 4,4 / 4,9 | 30,6 / 39,9 / 32,5 |
+| synchronisé, détection coupée | 120 i/s | 9,4 / 9,9 | 29,8 / 33,1 / 29,9 |
+| synchronisé, détection | 240 i/s | 8,3 / 8,4 | 38,5 / 47,3 / 39,3 |
+
+- **La détection fait ce qu'il faut.** Le flux monte à 240 i/s dans les
+  quatre passes, et la porte n'écarte plus rien. L'hôte gagne 2,8 ms en
+  médiane en tearing (2,1 en moyenne). En synchronisé, il gagne 1,1 ms en
+  médiane et 4 ms au p90.
+- **Le clic mesuré empire pourtant de 4 à 10 ms, et c'est la sonde.** Hors des
+  clics, une image va de la capture au dessin en 12 ms, à 120 comme à
+  240 i/s. Mais pendant qu'elle guette le drapeau (200 ms au plus par clic),
+  le Canvas2D relit trois pixels après chaque dessin. Ce sont trois
+  allers-retours vers le processus GPU : 4,7 ms par image sur le 780M, contre
+  0,2 sans la sonde.
+  - À 120 i/s, la relecture tient dans l'intervalle. À 240 i/s (4,2 ms), non :
+    les images s'empilent derrière les relectures, et le décodage attend
+    7,7 ms en médiane au lieu de 0,6.
+  - Et le drapeau était daté après sa propre relecture. Sur ce chemin
+    (Canvas2D sur le thread principal, le défaut), chaque clic mesuré
+    comptait donc ~4,5 ms de sonde, à toute cadence, bancs 1, A1 et 2
+    compris. Les écarts mesurés à cadence égale restent valables.
+- **Un second écart du banc : le transport.** Mes passes faisaient passer la
+  vidéo par une piste RTP (`MW_RTP_VIDEO`, hérité des lanceurs U1.4). Chrome
+  remet ces images au client sur son métronome de 64 Hz (POC Ultra, §6.11 :
+  7,8 ms de retenue en médiane). Elles arrivent par paquets de 2 à 5 toutes
+  les ~16 ms, ce qui aggrave l'empilement. Le produit envoie la vidéo en SCTP.
+- **Le correctif de la sonde.**
+  - Le moteur de rendu note l'instant du dessin avant de relire, et la sonde
+    date le drapeau de cet instant (`probeDrawnAt`, Canvas2D, WebGL et
+    WebGPU).
+  - Une seule relecture couvre la ligne entre les trois points. Sur la RTX,
+    elle coûte deux fois moins : 0,6 à 1,2 ms contre 1,3 à 2,2 en médiane
+    (micro-banc, Chrome sans fenêtre).
+- **Reste** : refaire le clic avec la sonde corrigée et en SCTP, détection
+  coupée contre allumée, quand l'UM790Pro revient sous Windows.
+
+Concrètement, pour l'utilisateur : rien ne change pour lui. L'« Auto » monte
+déjà le flux à 240 i/s quand le jeu va plus vite que l'écran du client, et
+l'hôte y gagne 2 à 3 ms. C'est l'outil de mesure qui change : les clics
+publiés jusqu'ici comptaient quelques millisecondes de la sonde elle-même, et
+le banc ne mesurait pas le transport du produit.
