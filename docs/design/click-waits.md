@@ -414,3 +414,62 @@ du produit (SCTP), un clic met environ 11 ms à revenir à l'écran du client, e
 l'« Auto » détecté le ramène vers 7,5 ms en montant le flux à 240 i/s. Les
 deux tiers de ce temps sont côté hôte, entre l'entrée injectée et l'image
 capturée : c'est là que les leviers suivants doivent chercher.
+
+## 7. Fin de Windows : AW2.2 et AW2.3 sur dossier, et l'encodage sous un vrai jeu en REALTIME (09/10/2026)
+
+- **AW2.2, la capture déclenchée par la présentation, n'a rien à gagner.** DDA
+  remet chaque composition 0,1 ms après sa présentation (0,2 au p90, bancs 2,
+  c1, c2 et c3). Aucune capture ne peut prendre une image avant que DWM l'ait
+  composée : DDA et WGC lisent toutes deux la sortie de la composition. Entre
+  le Present d'une application et la capture, il ne reste que l'attente de la
+  composition, au rythme de l'écran virtuel : 4,2 ms au plus à 240 Hz, ~2 en
+  moyenne. Le seul levier sur elle est la fréquence de l'écran virtuel, et
+  500 Hz a déjà échoué (plan framerate-hote, §12).
+- **AW2.3, le flip indépendant sous capture, est sans objet.** L'écran
+  virtuel (IddCx) est toujours composé : plein écran et fenêtre y donnent le
+  même clic (§3.3).
+
+**L'encodage sous un vrai jeu, dans la classe GPU du produit.** Créneau de
+59, 08:45-09:02. RE9 (la copie, la RTX à ~99 %) tourne sous `mw-click-target`,
+sur l'écran virtuel à 240 Hz, en SCTP avec la sonde corrigée. 60 clics par
+passe, deux passes par cas (ABBA). Toute la chaîne de banc tourne élevée : la
+`--dev` obtient REALTIME, comme le worker SYSTEM du produit, et
+`MW_GPU_PRIORITY=high` la garde en HIGH pour l'autre bras. Rien d'autre ne
+change.
+
+| Sous RE9 | Clic p50 / p90 / moyen | Capture → écran (image du drapeau) | Encodage moyen / p95 / p99 | Compositions captées par s |
+|---|---|---|---|---|
+| HIGH (la `--dev` des bancs 1 et 2) | 15,7 / 21,6 / 16,0 | 7,9 ms | 4,7 / 10,2 / 13,3 | 166-169 |
+| REALTIME (le produit) | 12,6 / 16,4 / 12,7 | 4,7 ms | 2,2 / 3,6 / 3,6 | 220-222 |
+
+- **Avec REALTIME, un jeu qui sature le GPU ne coûte plus qu'~1 ms au
+  clic** : 12,6 ms en médiane, contre 11,7 sans jeu (§6.1, même réglage). En
+  HIGH, il coûtait ~4 ms.
+- Le gain vient de l'encodage (4,7 → 2,2 ms en moyenne, p99 13,3 → 3,6) et de
+  la capture. DDA rend la main aussitôt (0,5 → 0,1 ms, p95 3,6 → 0,13), et
+  voit 220 compositions par seconde au lieu de 167.
+- Les ~3 ms d'encodage vues sous RE9 au banc 2 venaient donc bien de la classe
+  HIGH de la `--dev`, pas du produit.
+- Les quantiles d'encodage du journal (`host stages`) sont donnés par paliers :
+  les deux passes d'un même bras tombent sur les mêmes valeurs.
+
+**Bilan de la partie A sous Windows.** En LAN filaire, avec le transport du
+produit, un clic vaut ~11,5 ms avec un jeu rapide. Il descend vers 7,5 ms
+quand l'« Auto » monte le flux à 240 i/s, et monte à ~12,5 ms sous un jeu qui
+sature le GPU. Les deux tiers de ce temps sont dans l'hôte, entre l'entrée
+injectée et la capture :
+- la remise de l'entrée à l'application, 1 à 2 ms ;
+- l'attente de sa prochaine image ;
+- celle de la composition, 4,2 ms au plus à 240 Hz.
+
+Il n'y a pas d'image en plus entre DWM et la capture, et il ne reste aucun
+levier du côté de la capture. Le poste B est versé au POC Ultra (U3.7).
+Linux et macOS viendront après la session « Cadence ».
+
+Concrètement, pour l'utilisateur : sur un PC Windows relié en filaire, un clic
+revient à l'écran en une douzaine de millisecondes, même quand un jeu pousse la
+carte graphique à fond. MoonlightWeb passe devant le jeu sur le GPU, et le jeu
+ne lui coûte qu'environ une milliseconde. Quand le jeu va plus vite que l'écran
+de l'appareil qui regarde, l'« Auto » monte le flux à 240 images par seconde et
+le clic descend vers 7,5 ms. Le reste du délai se passe surtout dans le jeu et
+dans la composition de Windows, pas dans MoonlightWeb.
