@@ -84,6 +84,26 @@ present for the picture that carried it: the two agree when ~0), `handoff`,
 beside the pass writes `<tag>.re9.txt`, whose `scene from here` and `scene to
 here` lines bound the frames counted.
 
+## A, the stream's gate — gatesim.py
+
+The host encodes only the presents its gate admits (`core/FrameCadence.h`).
+`gatesim.py` replays that gate on a pass's captures (`clicktrace=1`), at the
+pass's rates or any other, and says what the stream would have carried: new
+pictures and carried ones a second, those skipped, how long a skipped one's
+change waited for the next admitted picture, and that wait averaged over every
+instant. Its `Gate` is a copy of `FrameCadence::admit()`: change both together.
+It gives the host's own "not carried" count to within 2.
+
+```
+python scripts/bench/clickpath/gatesim.py <tag> [--fps 50] [--hz 240] [--advance]
+```
+
+`--advance` is the change the Android TV bench proposed (08/10/2026): a late
+present moves the grid on by whole intervals from the tick it missed, instead of
+re-anchoring the grid on itself. On RE9 (~77 pictures a second) on the virtual
+display at 240 Hz, a 60 fps stream carries 48.4 a second today and 59.6 with
+it; a 50 fps stream 40.7 and 49.7.
+
 ## B — gpuwait.py
 
 What the pass needs: `localStorage.mw_ultra_trace = '1'` in the client's page
