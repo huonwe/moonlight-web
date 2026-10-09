@@ -57,17 +57,42 @@ namespace mw::native {
 ///
 /// A present a little BEFORE the tick — within kSlackFraction of the interval —
 /// goes through too, because the next one would arrive a whole present period
-/// later for nothing. The grid still advances by exactly one interval from
-/// where it was, never "now plus one": that is what keeps the rate at the
-/// setting when every admitted present is early or late by a few milliseconds
-/// (anchoring on the present itself measured 56 fps for 60 on a 165 Hz panel).
-/// Only when the admitted present is LATE by more than one present period of
-/// the display — meaning a present was MISSING where the grid expected one:
-/// the screen had been still, the loop had stalled, or a game running at the
-/// stream's own rate had drifted out of phase with the grid — is the grid
-/// re-anchored on it. So the loop never catches up with a burst, a first
-/// change after a pause is on the wire at once, and a game at 60 fps under a
-/// 60 fps stream locks onto the grid instead of beating against it.
+/// later for nothing. So each tick owns a window, from a quarter interval
+/// before it to a quarter interval before the next, and the first present in
+/// that window is the one encoded, however late in it it comes. The grid
+/// advances by exactly one interval from where it was, never "now plus one":
+/// that is what keeps the rate at the setting when every admitted present is
+/// early or late by a few milliseconds (anchoring on the present itself
+/// measured 56 fps for 60 on a 165 Hz panel).
+///
+/// Only a window that closed with nothing in it moves the grid — a present was
+/// MISSING where the grid expected one. When the present that ends the gap
+/// comes within the next interval — a game at the stream's own rate that
+/// drifted, or landed a refresh late, past the window's end; content a little
+/// faster than the stream with a longer gap than usual — it is counted for
+/// the tick it missed, and the grid moves so that its window ends there: the
+/// next window opens at the present. Later than that — two windows with
+/// nothing, the screen had been still or the loop had stalled — the grid
+/// restarts on it, one interval on. So the loop never catches up with a burst
+/// (one missed tick at most is made up, and only while the content keeps
+/// coming), a first change after a pause is on the wire at once, and a game at
+/// 60 fps under a 60 fps stream locks onto the grid instead of beating against
+/// it: its latest present sits at the end of a window, the others inside.
+///
+/// The grid used to be re-anchored on any present later than one refresh of
+/// the display, taken for a missing one. Measured on the Android TV bench (B,
+/// 08/10/2026): content at 60 fps on a 144 Hz display streamed at 50 comes
+/// every 16.7 ms, so the first present past a tick is often more than a
+/// refresh (6.9 ms) late with none missing; each re-anchor threw that lateness
+/// away, the next present fell too early and was skipped — 40 fps carried for
+/// 50. Replayed on RE9 (77 fps) on the virtual display at 240 Hz, the default
+/// since 30/09: 48.4 for 60, 40.7 for 50. The same rule cost a 60 fps test
+/// pattern on a 120 Hz screen, streamed at 60, a third of its frames: landing
+/// a refresh early or late, it re-anchored on the late ones and skipped the
+/// early ones. Moving the grid by whole intervals only, never its phase, gives
+/// the rate back to the first case and not to the second: a game at the
+/// stream's rate a refresh early or late then beats against the grid, down to
+/// 45 fps for 60 in simulation.
 ///
 /// ── A stream at the display's own rate: a ceiling, not a grid ───────────────
 ///
@@ -111,8 +136,7 @@ class FrameCadence
 {
 public:
     /// How early a present may be, as a fraction of the interval, and still go
-    /// through: a quarter. Two presents can never both be admitted inside one
-    /// interval as long as the display is faster than the stream, whatever the
+    /// through: a quarter. A window admits one present at most, whatever the
     /// slack, so the slack costs no rate — it only decides how far the emission
     /// may run ahead of the grid before the next present is preferred.
     static constexpr int kSlackDivisor = 4;
@@ -124,8 +148,8 @@ public:
     static constexpr int kCeilingHeadroom = 50;
 
     /// @p fps 0 (or negative) disables the gate. @p displayHz is the display's
-    /// refresh, which sets how late an admitted present may be before the grid
-    /// is re-anchored on it (see above); 0 falls back to half an interval.
+    /// refresh, which sets how late a ceiling's present may be before it is
+    /// re-anchored on (see admit()); 0 falls back to half an interval.
     explicit FrameCadence(int fps, int displayHz = 0)
         : m_IntervalNs(fps > 0 ? static_cast<int64_t>(1000000 / fps) * 1000 : 0)
         , m_ReanchorNs(displayHz > 0 ? static_cast<int64_t>(1000000 / displayHz) * 1000
@@ -170,14 +194,26 @@ public:
     {
         if (!enabled()) return true;
         const int64_t nowNs = nowUs * 1000;
-        if (nowNs + slackUs() * 1000 < m_NextDueNs) {
+        const int64_t slackNs = slackUs() * 1000;
+        if (nowNs + slackNs < m_NextDueNs) {
             m_Skipped++;
             return false;
         }
-        if (nowNs - m_NextDueNs > m_ReanchorNs)
-            m_NextDueNs = nowNs + m_IntervalNs;
+        const int64_t lateNs = nowNs - m_NextDueNs;
+        if (m_Ceiling) {
+            // A ceiling keeps its own rule: re-anchored on a present later than
+            // one refresh of the display.
+            m_NextDueNs = lateNs > m_ReanchorNs ? nowNs + m_IntervalNs : m_NextDueNs + m_IntervalNs;
+            return true;
+        }
+        // How late a present may be and still be in its tick's window.
+        const int64_t windowEndNs = m_IntervalNs - slackNs;
+        if (lateNs < windowEndNs)
+            m_NextDueNs += m_IntervalNs; // in its window: the grid keeps its phase
+        else if (lateNs < windowEndNs + m_IntervalNs)
+            m_NextDueNs = nowNs + slackNs; // one window empty: the next one opens here
         else
-            m_NextDueNs += m_IntervalNs;
+            m_NextDueNs = nowNs + m_IntervalNs; // a pause or a stall: restart on it
         return true;
     }
 
