@@ -337,6 +337,16 @@ def main():
     if pin:
         access["pin"] = pin
     access["lan"] = fleet.lan_url(a.host, probe) or access.get("lan")
+    # MW_BENCH_VIA=rendezvous: the page reached through the host's rendezvous
+    # address, as from the Internet, its interface from the bootstrap's cache
+    # and its requests through the tunnel; the stream is the same WebRTC. For
+    # mw-mac on 09/10/2026, whose page at its own address hung on a connection
+    # that never opened (see library()).
+    rdv = ((probe.get("internet") or {}).get("rendezvous") or {}).get("url")
+    if os.environ.get("MW_BENCH_VIA") == "rendezvous":
+        if not rdv:
+            raise SystemExit("MW_BENCH_VIA=rendezvous but %s has no rendezvous address" % a.host)
+        access["lan"] = rdv
     # A remote client reaches this machine's --dev at the address it is told,
     # a remote host at its own. With both, the remote client is the one driven:
     # until 04/10/2026 the kiosk on this machine stood in for it (every --host
