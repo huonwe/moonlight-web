@@ -63,7 +63,13 @@ What the numbers below were measured against (code as of 04/10/2026).
   `backend/src/LatencyFlag.cpp`): the client clicks, the host raises a flag on
   screen, the client times until it sees it. The whole loop the player feels.
   Split by `inputstamp` into **up** (client → host injection), **rest**
-  (everything after).
+  (everything after). ⚠️ Until `652fc726` (09/10) the probe measured itself:
+  on the default renderer (Canvas2D, main thread) it read the flag's pixels
+  after every draw and dated the flag after that read, ~4.5 ms per click
+  (4.7 ms a frame on the 780M). Absolute click times before that are high by
+  about that much; gaps between arms at the same frame rate stand. Comparisons
+  across frame rates do not (240 fps was 4-10 ms worse than 120). See §3,
+  09/10.
 - **Content age** (`scripts/bench/content-age/`, `scroll.html?band=time`): the
   age of what is on screen, read from a time band. ⚠️ The probe that reads the
   band delayed the frames it read by 4-13 ms on the main thread until
@@ -1492,6 +1498,33 @@ entry on the "1 GbE" path). 14:34-15:30, 23 passes. Detail and tables:
   With W4 on the Mac (above): the audio road is the better road on a clean or
   lossy cable, but in a busy Wi-Fi at Auto it fills the client's receive queue
   and SCTP wins. The choice of road depends on the link, not on one winner.
+
+### 09/10/2026 — The click probe measured itself: what it changes above (from the session « Capture et Attente »)
+
+No bench here; the fix and its numbers are in `652fc726` (not pushed).
+
+- **The bias.** While a click waits for its flag, the default renderer
+  (Canvas2D on the main thread) read the three flag pixels after every draw:
+  three `getImageData` calls, 4.7 ms a frame on the 780M against 0.2 without
+  the probe. The flag was dated after that read, so every click carried ~4.5 ms
+  of the probe. At 240 fps the frames behind also piled up (decode waiting
+  7.7 ms instead of 0.6), so 240 fps looked 4-10 ms slower than 120.
+- **What still holds in this file.** Every A/B above compares arms at the same
+  frame rate, on the same client and renderer, in the same session: the gaps
+  stand. That covers W2 B (`retrcut`), W2.5 (`sctpburst`), the W4 roads and
+  the resend budget on the Mac (page at 240 for every arm), and the N95's
+  passes.
+- **What does not.**
+  - Absolute click times (e.g. "~73 ms on the Mac") are high by about the
+    probe's cost, which was only measured on the 780M; the Mac's and the N95's
+    are not known.
+  - Click times compared across clients or frame rates (the Mac at 240 against
+    the UM790Pro at 120, Wi-Fi against Ethernet witnesses) carry different
+    biases.
+  - Frame ages and content ages are not dated by this probe; only the frames
+    drawn while a click waited could have been slowed at 240 fps.
+- **The RTP video track** still pays Chrome's 64 Hz metronome (U1.4 ter) on
+  top; the product's video is on SCTP.
 
 ## 4. The model so far (04/10/2026)
 
