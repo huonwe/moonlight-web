@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>GPU wait lab</title>
+    <style>
+      body {
+        margin: 0;
+        background: #000;
+        color: #ccc;
+        font: 12px monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      pre {
+        position: fixed;
+        top: 0;
+        left: 0;
+        margin: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="view" width="1920" height="1080"></canvas>
+    <pre id="log"></pre>
+    <script type="module">
+      // The page's GPU wait, away from any stream (POC Ultra U3.7, B1): see
+      // gpuwait-lab.js for the parameters; driven by gpuwait_lab.py over CDP.
+      // The result is left in window.__labResult.
+      import { runLab } from "./gpuwait-lab.js";
+
+      const params = Object.fromEntries(new URLSearchParams(location.search));
+      const out = document.getElementById("log");
+      const log = (s) => {
+        out.textContent += s + "\n";
+      };
+      async function run() {
+        if (params.thread === "worker") {
+          const w = new Worker("./gpuwait-lab.js", { type: "module" });
+          const r = await new Promise((resolve) => {
+            w.onmessage = (e) => resolve(e.data);
+            w.onerror = (e) => resolve({ error: e.message || "worker error" });
+            w.postMessage(params);
+          });
+          w.terminate();
+          if (r.error) throw new Error(r.error);
+          r.params.thread = "worker";
+          return r;
+        }
+        const view =
+          params.draw === "1" ? document.getElementById("view") : null;
+        const r = await runLab(params, log, view);
+        r.params.thread = "main";
+        return r;
+      }
+      window.__labResult = run().catch((e) => ({
+        error: String(e && e.stack ? e.stack : e),
+      }));
+      window.__labResult.then((r) =>
+        log(
+          r.error
+            ? "ERROR " + r.error
+            : "done: " + JSON.stringify(r.submitToDone),
+        ),
+      );
+    </script>
+  </body>
+</html>

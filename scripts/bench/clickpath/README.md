@@ -149,3 +149,27 @@ starts no earlier than the submit and ends no later than the work-done
 callback. Over each 2 s window, frames and references together, that bounds
 the offset; both bounds are printed, and the split of submit → work done into
 before the GPU starts, the GPU at work, and after it ends.
+
+## B, away from any stream — scripts/bench/ultra/gpuwait_lab.py
+
+The same submissions as `UltraPlayer` in a Chrome of its own, one GPU at a time
+(`--chrome-arg=--use-adapter-luid=<high>,<low>`), no MoonlightWeb instance:
+an empty command buffer, an empty timestamped pass, or a corpus frame decoded
+and presented into a WebGPU `OffscreenCanvas` then made a `VideoFrame`. Paced
+back to back, at 120 fps (`pace=tick`) or on animation frames; waited on by
+`onSubmittedWorkDone` or `mapAsync`; on the main thread or a worker; with or
+without a nudge (a cheap command every `nudgeEvery` ms while the submission
+waits, which makes Chrome's GPU process look at its fences again). The page is
+served cross-origin isolated, so the trace counts in µs.
+
+```
+python scripts/bench/ultra/gpuwait_lab.py --tag b1-rtx --rounds 2 --chrome-arg=--use-adapter-luid=0,81301
+python scripts/bench/clickpath/gpuwait.py b1-rtx-decode-tick-r0 --dir bench-out/ultra-lab
+```
+
+Each run writes `<tag>-<case>[-rN].ultratrace.json` (what `gpuwait.py` reads)
+and `.json` (the parameters and a summary), and prints a line: submit → done,
+its split by the GPU's timestamps (before the GPU starts, at work, after it
+ends), and the main thread's task time per frame (CDP `TaskDuration`). A remote
+Chrome (the UM790Pro's): `--remote-cdp` and `--http-port` through SSH tunnels,
+as `decoder_lab.py`. Findings: design `ultra-lan-poc.md` §6.25.
