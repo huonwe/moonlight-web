@@ -13,6 +13,12 @@ on the host's steady clock, from a pass run with:
   - or, instead of the flag, mw-click-target's log (--target): the click as the
     application got it, its present, and when the OS says it reached the screen.
 
+The same on a macOS host (plan « attente », AM0): CGEventPost for SendInput, the
+flag's event tap for its hook (no DwmFlush: no `composed` leg for the flag),
+ScreenCaptureKit's display time for the present, its callback for `deliver`,
+and the captured display's CVDisplayLink for DWM's timing. mw-click-target's
+`displayedUs` is then Metal's presentedTime.
+
 Files of the pass, in bench-out/content-age: <tag>.server.log, <tag>.click-trace.csv,
 and when the client's are there (<tag>.json, <tag>.clicks.frames.csv) they name
 the frame that showed the flag; without them it is the first frame presented
@@ -26,6 +32,8 @@ The legs, in ms:
   raise      hook → flag shown (its window painted)     (app: → Present returned)
   composed   shown → DWM composed it (DwmFlush returned) (app: → on the screen)
   present    shown → the present of the frame that showed it (LastPresentTime)
+  deliver    that present → the OS handed the frame to the engine (macOS:
+             ScreenCaptureKit's callback; Windows: empty, the same as handoff)
   handoff    that present → the capture handed the frame over
   host       received → handed over: the host's whole share
 and: `vblank` where in the captured screen's refresh the flag went up (0: at a
@@ -52,8 +60,8 @@ FLAG_TRACE = re.compile(r"\[LatencyFlag\] trace: flushed at steady (\d+) us(?:.*
                         r"(\d+) us, period (\d+) us, composed (\d+) us)?")
 RELAY = re.compile(r"click trace: input stamp (\d+) received at steady (\d+) us, handled at "
                    r"(\d+) us")
-LEGS = ["queue", "sendinput", "hook", "raise", "composed", "present", "handoff", "host",
-        "vblank", "wait", "late", "between"]
+LEGS = ["queue", "sendinput", "hook", "raise", "composed", "present", "deliver", "handoff",
+        "host", "vblank", "wait", "late", "between"]
 RATES = (60, 75, 90, 100, 120, 144, 165, 180, 240, 360, 480, 500)
 
 
@@ -271,6 +279,8 @@ def one(tag, a):
             row["composed"] = (fl["flushed"] - s_us) / 1000
         if frame:
             row["present"] = (frame["presentUs"] - s_us) / 1000
+            if frame.get("deliveredUs"):
+                row["deliver"] = (frame["deliveredUs"] - frame["presentUs"]) / 1000
             row["handoff"] = (frame["us"] - frame["presentUs"]) / 1000
             if rel:
                 row["host"] = (frame["us"] - rel[0]) / 1000
