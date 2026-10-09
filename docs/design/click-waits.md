@@ -765,14 +765,13 @@ sur l'écran virtuel.
   l'image du clic 40 à 55 % du temps à 240 Hz, contre 3 % à 120 Hz. La
   première série, avec la sonde d'avant, donnait le même sens (13,7 / 15,6
   contre 12,3 / 13,2). Les 240 Hz ne paieraient que si le flux suivait, et
-  seul Windows sait le faire monter. **Décision de Bruno** : l'écran virtuel
-  Linux à la fréquence du flux, comme sur Mac, ou l'« Auto » détecté sous
-  Linux.
+  seul Windows sait le faire monter. Suite au §10.1 : l'écran virtuel reste
+  à 240 Hz.
 - **Le DMA-BUF retire ~1,8 ms en médiane, ~3 ms en moyenne.** 1,5 ms viennent
   de la recopie de Mutter, et ~1,4 ms de la copie par le CPU (prise 1,65 →
   0,21 ms, conversion 1,0 → 0,66). GNOME 48 et au-delà ont déjà le DMA-BUF. Sur
-  GNOME 46, il laisse des traînées du pointeur (`PortalCapture.cpp`) :
-  **décision de Bruno**.
+  GNOME 46, il laisse des traînées du pointeur (`PortalCapture.cpp`) : suite
+  au §10.2.
 - **AL2.2 et AL2.3 : rien à gagner sur les tampons.** La capture prend déjà la
   plus récente, sitôt remise. La capture de Mutter part déjà du dessin, pas
   d'une horloge.
@@ -804,3 +803,58 @@ pourraient retirer environ 3 ms chacun : un écran virtuel à la fréquence du
 flux plutôt qu'à 240 Hz, et, sur GNOME 46, des images passées par la carte
 graphique plutôt que par la mémoire. GNOME 48 a déjà ce second point. Sur un
 écran réel à 60 Hz, le clic attend le balayage suivant et vaut plutôt 22 ms.
+
+## 10. Les deux leviers Linux au banc (09/10/2026, 17:24-18:03)
+
+Même montage qu'au §9 (UM790Pro, GNOME 46, client DualRTX en câble).
+
+### 10.1 L'écran virtuel à la fréquence du flux : non
+
+Flux à 60 i/s, passes ABBA de 60 clics, `MW_VDD_REFRESH` pour le bras à 240 Hz.
+
+| Écran virtuel | Contenu | Clic p50 / moyen | Images reçues par le client |
+|---|---|---|---|
+| 60 Hz | jeu à 60 i/s | 21,9 / 22,8 | 52,5 par s |
+| 240 Hz | jeu à 60 i/s | 18,5 / 19,5 | 60,0 par s |
+| 60 Hz | sans limite | 21,5 / 22,1 | 57,6 par s |
+| 240 Hz | sans limite | 20,7 / 22,4 | 59,9 par s |
+
+- **Quand l'écran tourne au rythme exact du flux, le limiteur de Mutter jette
+  des images** : celles qui arrivent un peu moins d'une période après la
+  précédente (bench-native-host §8s.3). À 60 Hz, il en perd 12 %, et le clic
+  coûte 3,3 ms de plus en moyenne.
+- Relues côté client, les passes à 120 Hz du §9.5 montrent la même perte :
+  110 images par seconde au lieu de 120. Le clic y gagnait 3,3 ms.
+- **Décision de Bruno : l'écran virtuel Linux reste à 240 Hz.** Le flux
+  garde toutes ses images. Les ~3 ms du clic à 120 i/s viennent de la porte de
+  cadence, qui écarte l'image du clic : c'est elle qu'il faudrait reprendre.
+
+### 10.2 GNOME 46 : le DMA-BUF quand le pointeur du client est verrouillé
+
+Décidé par Bruno, actif par défaut. Sur l'écran virtuel de GNOME 46, la capture
+reste en mémoire partagée tant que le pointeur peut se voir. Quand le client
+verrouille le sien, l'hôte reçoit des mouvements relatifs : c'est ce que demande
+un jeu qui cache le pointeur. La capture propose alors de nouveau le DMA-BUF
+sur le flux en cours (`PortalCapture::setDmabufWhilePointerHidden`). Au premier
+mouvement absolu, elle redemande la mémoire partagée.
+
+- **Mutter renégocie sur place** : même nœud et même écran virtuel. Les
+  fenêtres ne bougent pas.
+- Au retour, PipeWire gardait le paramètre de tampons DMA-BUF, et l'allocation
+  échouait (« error alloc buffers: Invalid argument »). Le paramètre est
+  maintenant nommé aussi pour la mémoire partagée, sur ce seul flux.
+- **La conversion Vulkan lit les deux sortes de tampons**, image par image.
+  Quand la chaîne choisie reste la même, rien n'est reconstruit : l'encodeur
+  continue, sans image clé. Une autre chaîne (GL, ou la paire CPU) est
+  reconstruite.
+- **L'image se fige ~50 ms à l'entrée et ~140 ms à la sortie**, contre 130 et
+  200 ms quand l'encodeur était reconstruit. Il ne reste que le temps de Mutter,
+  surtout l'allocation de ses tampons en mémoire partagée.
+- Le gain est celui du §9.5 : ~1,8 ms par clic en médiane, ~3 en moyenne.
+
+Concrètement, pour l'utilisateur : sur un hôte Ubuntu 24.04 (GNOME 46), un jeu
+qui capture la souris passe tout seul par la carte graphique, et chaque clic y
+gagne ~3 ms en moyenne. Quand on verrouille ou libère la souris, l'image marque
+un court arrêt (~50 ms en entrant, ~140 en sortant). Sur le bureau, rien ne
+change, et le pointeur ne laisse pas de traînées. L'écran virtuel reste à
+240 Hz : le flux garde toute sa fluidité, à 60 comme à 120 images par seconde.

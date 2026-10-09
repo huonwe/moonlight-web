@@ -158,6 +158,17 @@ public:
     /// route, to know which pipeline pair can take its frames. Known when
     /// start() returns: it waits for the first buffer.
     bool dmabuf() const;
+    /// GNOME's virtual monitor before GNOME 48 with a DMA-BUF offer: its
+    /// DMA-BUF frames keep trails of a pointer that moves over a still
+    /// desktop, so it starts in shared memory, and setDmabufWhilePointerHidden
+    /// moves it to DMA-BUF and back. False everywhere else, and before start().
+    bool switchesDmabufWithPointer() const;
+    /// Offer DMA-BUF again while the pointer is hidden (@p hidden), shared
+    /// memory alone while it may show: the formats offered again on the live
+    /// stream, which the compositor renegotiates in place. True when the
+    /// offer changed; the buffers that follow say what was settled on
+    /// (dmabuf()). Capture thread.
+    bool setDmabufWhilePointerHidden(bool hidden);
     /// The compositor has renegotiated the format again and again since
     /// start() without a single picture: it settles on one it cannot fill —
     /// KWin with a DMA-BUF modifier its renderer cannot allocate (Plasma 6.3
@@ -171,8 +182,9 @@ public:
     const CursorState& cursor() const override;
     /// A GNOME virtual monitor before GNOME 48: its pointer is asked painted
     /// into every picture (MutterScreenCast::embedsPointer), and its frames
-    /// are taken in shared memory only — Mutter's DMA-BUF ones leave trails of
-    /// it. Never on a monitor KWin makes, nor from GNOME 48.
+    /// are taken in shared memory while it may show — Mutter's DMA-BUF ones
+    /// leave trails of it (setDmabufWhilePointerHidden). Never on a monitor
+    /// KWin makes, nor from GNOME 48.
     bool cursorInPicture() const override;
 
 private:

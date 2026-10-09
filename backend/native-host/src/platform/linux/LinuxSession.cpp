@@ -877,6 +877,10 @@ public:
             if (m_Gamepad) m_Gamepad->remove(event);
             break;
         default:
+            if (event.type == Type::MouseMoveRelative)
+                m_ViewerPointer.store(2, std::memory_order_relaxed);
+            else if (event.type == Type::MouseMoveAbsolute)
+                m_ViewerPointer.store(1, std::memory_order_relaxed);
             if (m_Input) m_Input->inject(event);
             break;
         }
@@ -1167,6 +1171,7 @@ private:
                 if (m_Callbacks.onPortalGrant) m_Callbacks.onPortalGrant(granted);
             }
             m_PortalDmabuf = portal->dmabuf();
+            m_PortalCapture = portal.get();
             m_Capture = std::move(portal);
             // Before the modes are noted: a new layout may hand the screens
             // other CRTCs, and the watch below is not to take that for a mode
@@ -1179,6 +1184,9 @@ private:
 #endif
         auto kms = std::make_unique<capture::KmsCapture>(m_CardPath, m_ConnectorId);
         capture::KmsCapture& scanout = *kms;
+#if defined(MW_NATIVE_LINUX_PORTAL)
+        m_PortalCapture = nullptr;
+#endif
         m_Capture = std::move(kms);
         if (!m_Capture->start(error)) return false;
         watchInPlaceDrawing(scanout);
@@ -1237,6 +1245,7 @@ private:
         m_GamescopeStarted = session.started;
         m_OnGamescope = true;
         m_PortalDmabuf = cast->dmabuf();
+        m_PortalCapture = cast.get();
         m_Capture = std::move(cast);
         keepGamescope();
         return true;
@@ -1354,6 +1363,7 @@ private:
             return false;
         }
         m_PortalDmabuf = cast->dmabuf();
+        m_PortalCapture = cast.get();
         m_Capture = std::move(cast);
         m_OnMutter = true;
         return true;
@@ -1446,6 +1456,7 @@ private:
     {
         m_Pipeline.reset();
 #if defined(MW_NATIVE_LINUX_PORTAL)
+        m_PortalCapture = nullptr;
         const std::string made = m_OnMutter && m_MadeMonitor ? m_VirtualConnector : std::string();
         m_OnMutter = false;
         m_MadeMonitor = false;
@@ -1541,6 +1552,36 @@ private:
                   " modifiers for XR24, AR24, XB24, AB24), then shared memory");
         m_DmabufOffer = std::move(offer);
         return m_DmabufOffer;
+    }
+#endif
+
+#if defined(MW_NATIVE_LINUX_PORTAL)
+    /// The chain buildPipeline would pick for the buffers the portal hands
+    /// now is the one running — as the Vulkan conversion, which reads shared
+    /// memory and DMA-BUF alike, keeps it.
+    bool routeHoldsForPortalBuffers()
+    {
+        LinuxRouteFacts facts = routeFacts(!m_PortalDmabuf);
+#if defined(MW_NATIVE_LINUX_VULKAN)
+        if (linuxRouteWantsVulkanVideo(facts))
+            facts.vulkanEncoderRefusal = proofRefusal(m_Info.width, m_Info.height);
+#endif
+        return m_Pipeline && chooseLinuxRoute(facts).route == m_Route.route;
+    }
+
+    /// GNOME's virtual monitor before GNOME 48 (PortalCapture::
+    /// switchesDmabufWithPointer): DMA-BUF while the viewer's pointer is
+    /// locked, shared memory while it moves over the desktop. Its DMA-BUF
+    /// frames keep trails of a pointer that moves over a still desktop; a
+    /// game that hides the pointer has the viewer lock theirs, and no pointer
+    /// moves on the host. What it saves: ~3 ms of a click on average, 1.5 of
+    /// them Mutter's copy into shared memory, the rest the CPU's copy behind
+    /// it (design click-waits §9.5). Decided by Bruno, 09/10/2026.
+    void followPointerForDmabuf()
+    {
+        if (!m_PortalCapture || !m_PortalCapture->switchesDmabufWithPointer()) return;
+        m_PortalCapture->setDmabufWhilePointerHidden(
+            m_ViewerPointer.load(std::memory_order_relaxed) == 2);
     }
 #endif
 
@@ -2525,6 +2566,9 @@ private:
                 portalModeChanged = true;
             }
 
+#if defined(MW_NATIVE_LINUX_PORTAL)
+            followPointerForDmabuf();
+#endif
             capture::KmsFrame fresh;
             const int64_t acquireStartUs = steadyNowUs();
             const capture::AcquireStatus status = portalModeChanged
@@ -2625,6 +2669,37 @@ private:
                 return;
             }
 
+#if defined(MW_NATIVE_LINUX_PORTAL)
+            // The buffers changed kind under a renegotiation of ours
+            // (followPointerForDmabuf). The Vulkan conversion reads both,
+            // frame by frame: on a chain that stays the same, nothing is
+            // built again and the encoder goes on — the switch costs only
+            // Mutter's renegotiation. Another chain (GL reads no shared
+            // memory, the CPU pair no DMA-BUF) is rebuilt at the same size,
+            // and a keyframe starts the new encoder.
+            if (m_PortalCapture && m_PortalCapture->dmabuf() != m_PortalDmabuf) {
+                m_PortalDmabuf = m_PortalCapture->dmabuf();
+                const std::string kind = m_PortalDmabuf ? "DMA-BUF" : "shared memory";
+                if (routeHoldsForPortalBuffers()) {
+                    log::info("[native] the portal now hands " + kind +
+                              " — the same chain reads it");
+                } else {
+                    log::info("[native] the portal now hands " + kind +
+                              " — rebuilding the pair behind it");
+                    closeBurst("buffers changed");
+                    if (!buildPipeline(m_Info.width, m_Info.height, error)) {
+                        finish("the pipeline could not follow the portal's buffers: " + error);
+                        return;
+                    }
+                    noteRoute();
+                    m_RouteChanged = true;
+                    m_ForceKeyframe.store(true);
+                    m_PendingInvalidation.store(0);
+                    lastRealUs = steadyNowUs();
+                    resetBurst();
+                }
+            }
+#endif
             // The portal renegotiates a new size in place — a resolution
             // change on the compositor's side — where KMS reports the display
             // lost. The frames simply arrive bigger or smaller, and a pipeline
@@ -3058,7 +3133,14 @@ private:
     /// The DMA-BUF offered to the portal (dmabufOffer), asked once.
     capture::PortalCapture::DmabufOffer m_DmabufOffer;
     bool m_DmabufOfferAsked = false;
+    /// m_Capture when it is one of the portal's or Mutter's streams.
+    capture::PortalCapture* m_PortalCapture = nullptr;
 #endif
+    /// The viewer's last pointer move: 0 none yet, 1 absolute (a desktop, a
+    /// pointer on the screen), 2 relative (the viewer's pointer locked, which
+    /// a game that hides the host's pointer asks for). Input thread → capture
+    /// thread (followPointerForDmabuf).
+    std::atomic<int> m_ViewerPointer{0};
     /// The portal grant to replay on the next open — the session's own, then
     /// whatever the portal handed back. See openCapture.
     std::string m_PortalToken;
