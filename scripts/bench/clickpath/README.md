@@ -92,17 +92,23 @@ pass's rates or any other, and says what the stream would have carried: new
 pictures and carried ones a second, those skipped, how long a skipped one's
 change waited for the next admitted picture, and that wait averaged over every
 instant. Its `Gate` is a copy of `FrameCadence::admit()`: change both together.
-It gives the host's own "not carried" count to within 2.
 
 ```
-python scripts/bench/clickpath/gatesim.py <tag> [--fps 50] [--hz 240] [--advance]
+python scripts/bench/clickpath/gatesim.py <tag> [--fps 50] [--hz 240] [--before | --advance]
 ```
+
+`--before` replays the gate the passes of 08-09/10/2026 ran with: a present
+later than one refresh of the display re-anchored the grid on itself. With it,
+the replay gives the host's own "not carried" count to within 2. The gate
+since the fix of 09/10/2026 (Cadence session, design §9.6.1) moves the grid
+only when a tick's window closed with nothing in it. On RE9 (~77 pictures a
+second) on the virtual display at 240 Hz, a 60 fps stream carries 48.4 a second
+`--before` and 59.6 now; a 50 fps stream 40.7 and 49.7.
 
 `--advance` is the change the Android TV bench proposed (08/10/2026): a late
-present moves the grid on by whole intervals from the tick it missed, instead of
-re-anchoring the grid on itself. On RE9 (~77 pictures a second) on the virtual
-display at 240 Hz, a 60 fps stream carries 48.4 a second today and 59.6 with
-it; a 50 fps stream 40.7 and 49.7.
+present moves the grid on by whole intervals from the tick it missed. It gives
+the same rates on RE9, but a game at the stream's own rate, a refresh early or
+late, then beats against the grid (design §9.6.1).
 
 ## B — gpuwait.py
 
