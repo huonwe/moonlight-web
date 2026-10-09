@@ -64,12 +64,21 @@
  * picture, sometimes not, which is worse than not measuring at all. The bench
  * runs its Linux click-to-photon chapter in an X11 session; everything else
  * about the Linux host is unaffected and keeps running under Wayland.
+ *
+ * The one exception is the bench's own: MW_LATENCY_FLAG_SKIP=* says a bench
+ * application draws the flag itself (tools/click-target, a Wayland client in
+ * full screen, plan « attente » AL0), as on Windows and macOS. The flag is
+ * then armed, so the session raises it and the browser's probe runs, and
+ * nothing is drawn here, in either session type. A bench variable, never set
+ * by the product.
  */
 
 #include "LatencyFlag.h"
 
 #include <QDebug>
+#include <QRegularExpression>
 #include <QString>
+#include <QStringList>
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -128,6 +137,18 @@ bool isWaylandSession()
     if (envSet("WAYLAND_DISPLAY")) return true;
     const char* type = std::getenv("XDG_SESSION_TYPE");
     return type && std::strcmp(type, "wayland") == 0;
+}
+
+/// MW_LATENCY_FLAG_SKIP holds "*": a bench application draws the flag (see
+/// the Wayland note above). Screens by name are a Windows matter.
+bool drawnElsewhere()
+{
+    const char* skip = std::getenv("MW_LATENCY_FLAG_SKIP");
+    if (!skip) return false;
+    for (const QString& s : QString::fromUtf8(skip).split(
+             QRegularExpression(QStringLiteral("[;,\\s]+")), Qt::SkipEmptyParts))
+        if (s == QStringLiteral("*")) return true;
+    return false;
 }
 
 // ── The click source: virtual pointers under /dev/input ─────────────────────
@@ -560,6 +581,7 @@ namespace LatencyFlag {
 
 bool isSupported()
 {
+    if (drawnElsewhere()) return true;
     if (isWaylandSession()) return false;
     return envSet("DISPLAY");
 }
@@ -590,6 +612,14 @@ void setEnabled(bool enabled)
     if (enabled) {
         if (!isSupported()) {
             qInfo() << "[LatencyFlag] not available:" << unsupportedReason();
+            return;
+        }
+        if (drawnElsewhere()) {
+            // Armed for the probe, drawn by the bench's own application: no
+            // overlay, no thread (MW_LATENCY_FLAG_SKIP=*).
+            qInfo() << "[LatencyFlag] armed, drawn by another application "
+                       "(MW_LATENCY_FLAG_SKIP=*)";
+            g_Running = true;
             return;
         }
         // A thread that bailed out early (no display, no monitor) is joinable.

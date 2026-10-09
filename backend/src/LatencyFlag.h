@@ -48,7 +48,9 @@
  *     that canvas's presentation ~200 ms (DualRTX, AMD client, 25/09/2026),
  *     and the probe then measures its own flag. "*" keeps it off every screen
  *     while it stays armed, for a bench application that draws the flag itself
- *     (tools/click-target). A bench variable, never set by the product.
+ *     (tools/click-target) — on Linux too, where it also arms the flag in a
+ *     Wayland session, which has none of its own. A bench variable, never set
+ *     by the product.
  *   - Three flat bands, pure blue / white / red, wide enough to survive 4:2:0
  *     chroma and a downscale to 720p — the browser classifies three pixels,
  *     one per band. Geometry is shared with the frontend as screen fractions
