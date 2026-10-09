@@ -1747,7 +1747,7 @@ SwiftShader et sur le 780M. GPU restant au dernier morceau, 780M, 1080p :
 > ⚠️ Les verdicts des §6.19-6.20 ne tiennent plus. Leur HEVC passait par la
 > piste vidéo RTP (métronome de Chrome, ~8 ms), et la sonde du clic se
 > mesurait elle-même jusqu'à `652fc726` (`click-waits.md` §6). La remesure à
-> 120 i/s contre le HEVC du produit (SCTP) attend l'UM790Pro sous Windows.
+> 120 i/s contre le HEVC du produit (SCTP) est au §6.26.
 
 Le point de départ est B0 (`click-waits.md` §3.4), sur le 780M, en plein flux :
 5,1 ms de la soumission à la fin pour 2,2 ms de travail GPU, et 3,6 ms pour une
@@ -1832,6 +1832,104 @@ attend :
   qu'autour de la fin attendue (les horodatages GPU la donnent) pour épargner
   le fil principal. Puis des passes ABBA sur le câble, jugées au clic et à
   l'hôte → dessin.
+
+### 6.26 Le HEVC du produit contre PyroWave, à 120 i/s sur le câble (09/10/2026, 19:29-19:49)
+
+Le banc de référence de « Capture et Attente » (`click-waits.md` §6.1) :
+
+- **Hôte :** DualRTX, une `--dev` avec `build\` à `98276780`. L'écran virtuel du
+  produit est à 240 Hz, rendu par la RTX. `mw-click-target` est en fenêtre
+  (tearing).
+- **Flux :** « Auto », 1080p à 120 i/s (la fréquence de l'UM790Pro), détection
+  coupée.
+- **Client :** l'UM790Pro sous Windows (780M), en câble, Chrome 154.
+- **Sonde :** corrigée (`652fc726`, `5c96775d`), 60 clics par passe, deux passes
+  par bras en ABBA, soit 120 clics par bras.
+- **Une passe écartée.** La première passe HEVC SCTP a pris le chemin par la
+  Freebox : paire « prflx 82.67.150.202 ← prflx 192.168.1.254 », RTT de la
+  synchro 4,7 ms au lieu de 0,5, +2 ms par image. Elle a été refaite (r3).
+  Constat transmis au réseau (`network-latency-findings.md`).
+- **Outils :** `clicksplit.py` (le clic coupé à la capture, sur l'horloge du
+  client) et `gpuwait.py`. Le lanceur et les rapports sont dans le scratchpad
+  (`pw120c/` : `run.sh`, `report.py`, `pwlegs.py`, `paths.py`).
+
+« Hors sonde » : la capture → dessin des images hors des fenêtres de la sonde
+(du clic à 30 ms après le drapeau vu), le « capture → écran » du §6.1. Médiane
+/ moyenne en ms.
+
+| Bras | Clic | Clic → capture | Capture → dessin (clic) | Hors sonde |
+|---|---|---|---|---|
+| HEVC, SCTP (le produit) | 10,5 / 10,1 | 6,5 / 6,4 | 3,6 / 3,7 | 3,5 / 3,6 |
+| HEVC, route audio | 11,7 / 11,4 | 8,1 / 7,7 | 3,6 / 3,7 | 3,5 / 3,6 |
+| PyroWave, route audio | 18,7 / 19,2 | 5,7 / 6,0 | 12,3 / 13,1 | 10,8 / 11,4 |
+| PyroWave, SCTP | 20,2 / 19,5 | 7,2 / 6,8 | 12,6 / 12,6 | 11,0 / 11,2 |
+
+- **PyroWave perd ~8,5 ms au clic, et ~7,5 ms par image.** Le clic → capture
+  ne dépend pas du codec : il va de 6 à 8 ms selon la phase tirée au hasard,
+  à ±1 ms d'un bras à l'autre. Tout l'écart est de la capture au dessin. Le
+  HEVC du produit retrouve les chiffres du §6.1 (3,5 ms).
+- **Le gain des §6.19-6.20 venait de la piste vidéo RTP du HEVC**, pas de
+  PyroWave.
+- **La route audio ne sert à rien au HEVC** : ses images font ~180 octets sur
+  cette scène presque fixe. Pour PyroWave, elle fait arriver l'image 0,7 ms
+  plus tôt que SCTP. Le clic n'en montre rien.
+
+Les étapes d'une image, d'après le journal des images, le relais de l'hôte et
+la trace d'`UltraPlayer` (passes r2, ~6 200 images chacune). Médianes en ms :
+
+| Étape | HEVC (4 passes) | PyroWave, route audio | PyroWave, SCTP |
+|---|---|---|---|
+| hôte : capture → relais | 1,7-2,1 | 1,7 | 1,8 |
+| relais → arrivée dans la page | ~1,0 | 3,4 | 4,1 |
+| arrivée → soumission | — | 0,3 | 0,3 |
+| décodage (HEVC) ; soumission → fin (PyroWave) | 0,4 | 4,7 | 4,8 |
+| dont travail du GPU | — | 2,2 | 2,2 |
+| image remise → dessinée | 0,2 | 0,3 | 0,3 |
+| capture → dessin | 3,3-3,7 | 10,7 | 11,4 |
+
+- **Le trajet : +2,5 à 3 ms.** PyroWave envoie l'image entière à chaque fois :
+  177 Ko, soit 1,45 ms rien que sur le fil à 1 Gbit/s. Le HEVC n'envoie que
+  la différence, ~180 octets ici.
+- **Le décodage : +4,3 ms.** Le décodeur matériel du 780M rend le HEVC en
+  0,4 ms. PyroWave demande 2,2 ms de GPU (iDWT 1,77, présentation 0,31), puis
+  attend Chrome.
+- **B1 sur le 780M, en plein flux** (`gpuwait.py`, les deux passes r2) :
+  - de la soumission à la fin : 4,6 ms, pour 2,2 ms de GPU ;
+  - après la fin du GPU : 1,1 à 1,7 ms (selon la borne) ;
+  - avant que le GPU commence : 0,4 à 0,9 ms ;
+  - une soumission vide horodatée : 3,6-3,8 ms.
+
+  C'est le délai du §6.25, au même ordre que sur les GPU de DualRTX.
+
+**Ce que les leviers connus peuvent rendre, au mieux :**
+
+| Levier | Gain par image | Source |
+|---|---|---|
+| la relance (§6.25) | 1,5 à 2 ms | §6.25 |
+| le décodage par tranches | ~0,7 ms | §6.23 |
+| la route audio plutôt que SCTP | ~0,7 ms | ci-dessus |
+
+Ces leviers laissent PyroWave vers 8 ms de la capture au dessin, contre 3,5 ms
+pour le HEVC. Même plancher sans aucune attente, PyroWave ne passe pas sous
+~5,8 ms :
+
+| Étape | ms |
+|---|---|
+| hôte | 1,8 |
+| fil (177 Ko à 1 Gbit/s) | 1,45 |
+| GPU | 2,2 |
+| dessin | 0,3 |
+
+Un jeu en mouvement grossirait les images du HEVC, pas celles de PyroWave.
+Mais sous RE9, qui bouge et sature le GPU de l'hôte, le HEVC du produit reste
+à 4,7 ms de la capture à l'écran (`click-waits.md` §7, en REALTIME) : l'écart
+ne se refermerait pas.
+
+**Verdict.** Dans le navigateur, sur ce client et ce lien, PyroWave n'a pas de
+gain à offrir contre le HEVC du produit par SCTP. Il perd ~7,5 ms par image et
+~8,5 ms au clic, et ses leviers connus n'en rendent pas la moitié. Ce qui
+reste de U3.7 (la relance dans `UltraPlayer`, B2) réduirait l'écart sans
+l'inverser. La suite du POC est une décision de Bruno.
 
 ## 7. Concrètement, pour l'utilisateur
 
