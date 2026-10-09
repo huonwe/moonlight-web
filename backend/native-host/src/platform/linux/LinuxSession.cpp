@@ -46,6 +46,7 @@
 #include "../../encode/RateGovernor.h"
 #include "SleepInhibit.h"
 #include "../../convert/linux/CpuConvert.h"
+#include "../../convert/linux/GlReadback.h"
 #include "../../encode/OpenH264Encoder.h"
 #include "../../encode/linux/VaapiEncoder.h"
 #include "../../input/linux/UinputGamepad.h"
@@ -475,6 +476,13 @@ private:
 /// KMS → DMA-BUF mmap → CPU → OpenH264: the converter owns the I420 planes, the
 /// encoder reads them. Two copies per frame — the pixels into the planes, the
 /// bitstream out — on a machine that has no other way.
+///
+/// Two converters, one per kind of frame. A machine with a render node but no
+/// encoder on it (Fedora's own Mesa, a libva that cannot load the driver —
+/// issue #34) hands over the GPU's TILED scanout, which only the GPU can read:
+/// GlReadback converts it there and reads the planes back. CpuConvert keeps
+/// what it was written for: a linear buffer of a render-node-less machine, and
+/// the portal's shared memory, which GL cannot import.
 class CpuPipeline final : public VideoPipeline
 {
 public:
@@ -490,18 +498,52 @@ public:
         if (!m_Converter.init(capture.fourcc(), capture.width(), capture.height(), outputWidth,
                               outputHeight, error))
             return false;
+        m_UseReadback = false;
+        m_ReadbackRefusal.clear();
+        const std::string node = capture.renderNodePath();
+        if (node.empty()) {
+            m_ReadbackRefusal = "this machine has no render node";
+        } else if (m_Readback.init(node, capture.fourcc(), capture.width(), capture.height(),
+                                   outputWidth, outputHeight, m_ReadbackRefusal)) {
+            if (m_Readback.outputWidth() == m_Converter.outputWidth() &&
+                m_Readback.outputHeight() == m_Converter.outputHeight()) {
+                m_UseReadback = true;
+            } else {
+                m_ReadbackRefusal = "the GPU and CPU converters disagree on the output size";
+                m_Readback.stop();
+            }
+        }
+        if (!m_UseReadback && !node.empty())
+            log::warning("[native] the GPU cannot convert for the CPU encoder (" +
+                         m_ReadbackRefusal + ") — a tiled scanout will end the session");
         return m_Encoder.init(m_Converter.outputWidth(), m_Converter.outputHeight(), fps,
                               bitrateKbps, 0, tuning, error);
     }
     bool convert(const capture::KmsFrame& frame, const capture::CursorState& cursor,
                  const convert::CursorDraw& draw, std::string& error) override
     {
-        return m_Converter.convert(frame, cursor, draw, error);
+        if (m_UseReadback && convert::GlReadback::takes(frame)) {
+            m_LastFromGpu = true;
+            return m_Readback.convert(frame, cursor, draw, error);
+        }
+        m_LastFromGpu = false;
+        if (m_Converter.convert(frame, cursor, draw, error)) return true;
+        // The one failure a user can act on, said in their terms: the CPU
+        // converter was only ever meant for a machine with no GPU encoder AND
+        // no tiled buffer — this one has both problems.
+        if (frame.modifier != 0 && frame.modifier != DRM_FORMAT_MOD_LINEAR)
+            error = "no GPU encoder is available here (VA-API or Vulkan Video did not "
+                    "come up — on Fedora, Mesa's H.264/HEVC encoding comes with RPM Fusion's "
+                    "freeworld drivers), and the CPU encoder cannot read this GPU's tiled "
+                    "screen buffer: " +
+                    (m_ReadbackRefusal.empty() ? error : m_ReadbackRefusal);
+        return false;
     }
     bool encode(bool forceKeyframe, uint32_t frameNumber, encode::EncoderOutput& out,
                 std::string& error) override
     {
-        return m_Encoder.encode(m_Converter.picture(), forceKeyframe, frameNumber, out, error);
+        return m_Encoder.encode(m_LastFromGpu ? m_Readback.picture() : m_Converter.picture(),
+                                forceKeyframe, frameNumber, out, error);
     }
     void releaseOutput() override { m_Encoder.releaseOutput(); }
     bool setBitrate(int kbps, std::string& error) override
@@ -516,16 +558,30 @@ public:
     std::string describe(const char* source) const override
     {
         // "mapped" covers both ways in: an mmap of a DMA-BUF on the scanout
-        // route, memory the portal already mapped on the other.
+        // route, memory the portal already mapped on the other. "read back":
+        // GL converted, the CPU copied the planes out.
         return std::string("via ") + encode::OpenH264Encoder::version() + " — " + source +
-               " → mapped → CPU → OpenH264, 2 copies (the pixels, the bitstream), " +
+               (m_UseReadback ? " → EGL → read back → OpenH264, 2 copies (the planes, the "
+                                "bitstream), "
+                              : " → mapped → CPU → OpenH264, 2 copies (the pixels, the "
+                                "bitstream), ") +
                std::to_string(m_Converter.threads()) + "+" + std::to_string(m_Encoder.threads()) +
                " threads";
+    }
+    void detachThread() override
+    {
+        if (m_UseReadback) m_Readback.detachThread();
     }
 
 private:
     convert::CpuConvert m_Converter;
+    convert::GlReadback m_Readback;
     encode::OpenH264Encoder m_Encoder;
+    bool m_UseReadback = false;
+    bool m_LastFromGpu = false;
+    /// Why the GPU does not convert here, for the log and for the error a
+    /// tiled frame ends the session with.
+    std::string m_ReadbackRefusal;
 };
 
 class LinuxSession final : public Session

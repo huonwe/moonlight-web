@@ -12,11 +12,14 @@
 #include "capture/linux/KmsCapture.h"
 #include "convert/linux/CpuConvert.h"
 #include "convert/linux/GlConvert.h"
+#include "convert/linux/GlReadback.h"
+#include "encode/OpenH264Encoder.h"
 #include "encode/linux/VaapiEncoder.h"
 #include "platform/linux/ScopedCapability.h"
 
 #include <drm_fourcc.h>
 #include <fcntl.h>
+#include <gbm.h>
 #include <glob.h>
 #include <linux/capability.h>
 #include <sys/mman.h>
@@ -602,5 +605,186 @@ void run_cpu_cursor_tests()
     CHECK_EQ(luma(53, 33), background);
 
     ::close(fd);
+#endif
+}
+
+// Issue #34: a machine with a GPU but no encoder on it. The CPU pair is then
+// handed the GPU's tiled scanout, which only the GPU can read — GlReadback
+// converts it there and copies the planes back for OpenH264. Two proofs: a
+// linear buffer of a known colour, which pins the chroma order the read-back
+// de-interleaves; and the real scanout, tiled, through to an H.264 keyframe.
+void run_gl_readback_tests()
+{
+    SECTION("Linux — GL converts for the CPU encoder and reads the planes back");
+
+#if !defined(MW_NATIVE_LINUX_GFX)
+    std::fprintf(stderr, "  skipped: Linux graphics backend not built\n");
+#else
+    using namespace mw::native;
+
+    glob_t nodes = {};
+    glob("/dev/dri/renderD*", 0, nullptr, &nodes);
+    const std::string node = nodes.gl_pathc > 0 ? nodes.gl_pathv[0] : "";
+    globfree(&nodes);
+    if (node.empty()) {
+        std::fprintf(stderr, "  skipped: no render node\n");
+        return;
+    }
+
+    // ── A known colour, in a linear buffer the test can write ───────────────
+    {
+        constexpr int kW = 256;
+        constexpr int kH = 144;
+        const int fd = ::open(node.c_str(), O_RDWR | O_CLOEXEC);
+        gbm_device* gbm = fd >= 0 ? gbm_create_device(fd) : nullptr;
+        gbm_bo* bo = gbm ? gbm_bo_create(gbm, kW, kH, GBM_FORMAT_XRGB8888,
+                                         GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR)
+                         : nullptr;
+        if (!bo) {
+            std::fprintf(stderr, "  skipped: GBM cannot allocate a linear XRGB8888 buffer\n");
+        } else {
+            uint32_t stride = 0;
+            void* mapData = nullptr;
+            auto* px = static_cast<uint8_t*>(
+                gbm_bo_map(bo, 0, 0, kW, kH, GBM_BO_TRANSFER_WRITE, &stride, &mapData));
+            CHECK(px != nullptr);
+            if (px) {
+                // Pure red: XRGB8888 is B, G, R, X in memory.
+                for (int y = 0; y < kH; ++y)
+                    for (int x = 0; x < kW; ++x) {
+                        uint8_t* p = px + static_cast<size_t>(y) * stride + x * 4;
+                        p[0] = 0x00;
+                        p[1] = 0x00;
+                        p[2] = 0xFF;
+                        p[3] = 0xFF;
+                    }
+                gbm_bo_unmap(bo, mapData);
+            }
+
+            capture::KmsFrame frame;
+            frame.width = kW;
+            frame.height = kH;
+            frame.fourcc = DRM_FORMAT_XRGB8888;
+            frame.modifier = DRM_FORMAT_MOD_LINEAR;
+            frame.planeCount = 1;
+            frame.fds[0] = gbm_bo_get_fd(bo);
+            frame.pitches[0] = gbm_bo_get_stride(bo);
+            frame.offsets[0] = 0;
+
+            convert::GlReadback readback;
+            std::string error;
+            if (!readback.init(node, DRM_FORMAT_XRGB8888, kW, kH, kW, kH, error)) {
+                std::fprintf(stderr, "  skipped: %s\n", error.c_str());
+            } else {
+                CHECK(convert::GlReadback::takes(frame));
+                CHECK(
+                    readback.convert(frame, capture::CursorState{}, convert::CursorDraw{}, error));
+                if (!error.empty()) std::fprintf(stderr, "  %s\n", error.c_str());
+                const encode::I420Picture& pic = readback.picture();
+                const int y = pic.y[static_cast<size_t>(kH / 2) * pic.strideY + kW / 2];
+                const int u = pic.u[static_cast<size_t>(kH / 4) * pic.strideU + kW / 4];
+                const int v = pic.v[static_cast<size_t>(kH / 4) * pic.strideV + kW / 4];
+                std::fprintf(stderr, "  red read back as Y %d U %d V %d\n", y, u, v);
+                // BT.709 limited: red is Y 63, Cb 102, Cr 240. U and V swapped
+                // would put 240 in U — a cyan-for-red picture on the client.
+                CHECK(y >= 61 && y <= 65);
+                CHECK(u >= 100 && u <= 104);
+                CHECK(v >= 238 && v <= 242);
+                readback.detachThread();
+                readback.stop();
+            }
+            if (frame.fds[0] >= 0) ::close(frame.fds[0]);
+            gbm_bo_destroy(bo);
+        }
+        if (gbm) gbm_device_destroy(gbm);
+        if (fd >= 0) ::close(fd);
+    }
+
+    // ── The real scanout, tiled, to an H.264 keyframe ───────────────────────
+    glob_t cards = {};
+    glob("/dev/dri/card*", 0, nullptr, &cards);
+    capture::KmsOutput target;
+    for (size_t i = 0; i < cards.gl_pathc && !target.active; ++i) {
+        std::string error;
+        for (const capture::KmsOutput& out :
+             capture::KmsCapture::listOutputs(cards.gl_pathv[i], error))
+            if (out.active && !target.active) target = out;
+    }
+    globfree(&cards);
+    std::string why;
+    if (!target.active) {
+        std::fprintf(stderr, "  scanout skipped: no display is being scanned out\n");
+        return;
+    }
+    if (!capture::KmsCapture::canReadFramebuffers(target.cardPath, why)) {
+        std::fprintf(stderr, "  scanout skipped: %s\n", why.c_str());
+        return;
+    }
+    capture::KmsCapture kms(target.cardPath, target.connectorId);
+    std::string error;
+    if (!kms.start(error)) {
+        std::fprintf(stderr, "  scanout skipped: %s\n", error.c_str());
+        return;
+    }
+    capture::KmsFrame frame;
+    if (kms.acquire(100, frame) != capture::AcquireStatus::Ok) {
+        std::fprintf(stderr, "  scanout skipped: no frame\n");
+        kms.stop();
+        return;
+    }
+    std::fprintf(stderr, "  scanout %dx%d modifier 0x%llx\n", frame.width, frame.height,
+                 static_cast<unsigned long long>(frame.modifier));
+
+    convert::GlReadback readback;
+    CHECK(readback.init(kms.renderNodePath(), frame.fourcc, frame.width, frame.height, frame.width,
+                        frame.height, error));
+    if (!error.empty()) std::fprintf(stderr, "  %s\n", error.c_str());
+    CHECK(readback.convert(frame, kms.cursor(), convert::CursorDraw{}, error));
+    if (!error.empty()) std::fprintf(stderr, "  %s\n", error.c_str());
+    kms.release();
+
+    const encode::I420Picture& pic = readback.picture();
+    unsigned minLuma = 255, maxLuma = 0;
+    for (int y = 0; y < pic.height; y += 16)
+        for (int x = 0; x < pic.width; x += 16) {
+            const unsigned l = pic.y[static_cast<size_t>(y) * pic.strideY + x];
+            minLuma = l < minLuma ? l : minLuma;
+            maxLuma = l > maxLuma ? l : maxLuma;
+        }
+    std::fprintf(stderr, "  read-back luma range: %u..%u\n", minLuma, maxLuma);
+    // The same proof as the VA-API surface above: a desktop, in limited range.
+    CHECK(maxLuma > minLuma);
+    CHECK(minLuma >= 16);
+    CHECK(maxLuma <= 235);
+
+    encode::OpenH264Encoder encoder;
+    if (!encoder.init(pic.width, pic.height, 60, 20000, 0, EncoderTuning{}, error)) {
+        std::fprintf(stderr, "  encoder skipped: %s\n", error.c_str());
+    } else {
+        encode::EncoderOutput out;
+        const bool encoded = encoder.encode(pic, true, 0, out, error);
+        if (!encoded) std::fprintf(stderr, "  encode failed: %s\n", error.c_str());
+        CHECK(encoded);
+        if (encoded && out.data) {
+            bool sps = false, pps = false, idr = false;
+            for (size_t i = 0; i + 3 < out.size; ++i)
+                if (out.data[i] == 0 && out.data[i + 1] == 0 && out.data[i + 2] == 1) {
+                    const int type = out.data[i + 3] & 0x1F;
+                    sps = sps || type == 7;
+                    pps = pps || type == 8;
+                    idr = idr || type == 5;
+                    i += 3;
+                }
+            std::fprintf(stderr, "  OpenH264 keyframe from the read-back: %zu bytes\n", out.size);
+            CHECK(out.keyframe);
+            CHECK(sps);
+            CHECK(pps);
+            CHECK(idr);
+            encoder.releaseOutput();
+        }
+    }
+    readback.detachThread();
+    readback.stop();
+    kms.stop();
 #endif
 }

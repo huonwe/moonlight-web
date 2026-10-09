@@ -240,6 +240,7 @@ else()
                 src/capture/linux/X11Damage.cpp
                 src/convert/linux/GlConvert.cpp
                 src/convert/linux/CpuConvert.cpp
+                src/convert/linux/GlReadback.cpp
                 src/encode/linux/VaapiEncoder.cpp
                 src/platform/linux/VaapiLibrary.cpp)
             target_include_directories(mw-native-host SYSTEM PRIVATE ${MW_LINUX_GFX_INCLUDE_DIRS})

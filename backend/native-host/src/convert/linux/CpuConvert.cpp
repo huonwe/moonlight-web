@@ -123,8 +123,8 @@ bool CpuConvert::convert(const capture::KmsFrame& frame, const capture::CursorSt
         return false;
     }
     // Only a linear buffer has a layout this code knows. A modifier here means
-    // a real GPU's tiled scanout — and a real GPU has a render node, so the
-    // Selector would not have sent it here.
+    // a real GPU's tiled scanout, which GlReadback takes when that GPU can
+    // render (CpuPipeline): arriving here, it could not (issue #34).
     if (frame.modifier != 0 && frame.modifier != DRM_FORMAT_MOD_LINEAR) {
         error = "the scanout buffer is tiled (modifier 0x" + [&] {
             char buf[24];
