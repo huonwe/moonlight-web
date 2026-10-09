@@ -1931,6 +1931,60 @@ gain à offrir contre le HEVC du produit par SCTP. Il perd ~7,5 ms par image et
 reste de U3.7 (la relance dans `UltraPlayer`, B2) réduirait l'écart sans
 l'inverser. La suite du POC est une décision de Bruno.
 
+### 6.27 U3.7 B2.0 : la relance dans `UltraPlayer` (09/10/2026, 20:12-20:22)
+
+Bruno a choisi de continuer U3.7. La relance du §6.25 entre dans le lecteur,
+derrière la clé de banc `mw_ultra_nudge` (`92e79bd7`, `GpuNudge.js`) :
+pendant qu'une image attend la fin de son travail, une soumission vide toutes
+les 0,25 ms, par une boucle de messages.
+
+- **`all`** : la boucle tourne dès la soumission, comme au labo du §6.25.
+- **`1` (`auto`)** : la boucle ne démarre que 1 ms avant la fin attendue, soit
+  la plus courte soumission → fin des 32 dernières images (10ᵉ centile).
+  - Quand ce départ est à plus de 2,5 ms, une minuterie couvre l'attente
+    d'avant. Plus près, la boucle part dès la soumission.
+  - Les horodatages GPU ne servent pas : avec la relance, la fin vue suit
+    celle du GPU à ~0,35 ms près, et Safari ou Firefox n'ont pas toujours
+    `timestamp-query`.
+
+Le labo du §6.25 (`gpuwait_lab.py`, `nudge=player`, `a5086ee6`) fait tourner
+`GpuNudge` lui-même : 1080p à 120 i/s, deux tours ABBA. Médianes en ms.
+
+| Cas | Soumission → fin | Début du GPU | Après la fin du GPU | Boucle par image | Fil principal par image | Images/s |
+|---|---|---|---|---|---|---|
+| RTX, sans | 3,7-3,8 | 0,5-0,6 | 2,8-2,9 | — | 0,85 | 120 |
+| RTX, `all` | 1,0-1,25 | 0,55-0,7 | 0,32-0,37 | 1,0-1,2 | 2,0-2,5 | 120 |
+| RTX, `auto` | 1,05-1,4 | 0,57-0,75 | 0,37-0,39 | 1,0-1,3 | 2,3-2,55 | 120 |
+| iGPU AMD, sans | 8,3-8,4 | 1,35 | 1,45-1,55 | — | 0,75-0,9 | 107-109 |
+| iGPU AMD, `all` | 6,65-6,7 | 0,72-0,74 | 0,37 | 6,6 | 7,1 | 120 |
+| iGPU AMD, `auto` | 6,9 | 0,9 | 0,44-0,48 | 2,9-3,0 | 3,3-3,4 | 120 |
+
+- **`GpuNudge` rend ce que rendait la relance du labo** : Chrome voit la fin
+  ~0,35 ms après celle du GPU, au lieu de 1,5 à 2,9 ms.
+- **Sur la RTX, `auto` revient à `all`** : la fin attendue (~1 ms) est trop
+  proche pour une minuterie.
+- **Sur l'iGPU AMD, `auto` coupe la boucle de moitié** (2,9-3,0 ms par image
+  contre 6,6), pour +0,25 ms :
+  - la minuterie arrive ~1 ms en retard ;
+  - le GPU commence moins tôt (0,9 contre 0,73 ms), faute de relance juste
+    après la soumission.
+- **Un défaut trouvé au premier essai, corrigé avant le commit.** 10 % des
+  images en `auto` lançaient leur boucle dès la soumission : un message de
+  l'attente précédente, encore en route, démarrait la suivante. Chaque message
+  porte maintenant le numéro de son attente.
+- **Sur le 780M**, le GPU travaille 2,2 ms et la fin se voit vers 3 ms avec la
+  relance. Le départ y tombe donc à moins de 2,5 ms : `auto` y vaut `all`.
+  - Attendu : 1,5 à 2 ms de moins par image (§6.25).
+  - Coût : ~3 ms de fil principal par image, soit ~36 % d'un cœur à 120 i/s.
+  - La boucle rend la main entre deux messages : les autres tâches de la page
+    attendent au plus un tour de boucle. À vérifier en plein flux.
+
+**Reste à mesurer :**
+
+- des passes ABBA sur le câble (l'UM790Pro), PyroWave avec et sans
+  `mw_ultra_nudge=1`, jugées au clic et à l'hôte → dessin ;
+- puis le bout de chaîne, sur l'écran du client.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
