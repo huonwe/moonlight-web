@@ -161,9 +161,36 @@ fi
 #    user while they are still sitting at this Mac: the native engine's probe
 #    asks for the permission on startup, and TCC only shows that prompt for a
 #    running program. Nothing here can grant it on their behalf.
+#
+#    An update lands on a running app: the bundle on disk is new, the process
+#    is not, and `open -a` only brings the old one forward. So this edition's
+#    own LaunchAgent, when it is running, is restarted in place
+#    (`kickstart -k`: launchd stops it and starts the new binary, --autostart,
+#    no browser). Otherwise any instance of this edition's binary, started by
+#    hand, is asked to quit before the launch. The other edition's app and
+#    agent have their own names and are never touched.
 if [ "$CONSOLE_UID" != "0" ]; then
-    /bin/launchctl asuser "$CONSOLE_UID" /usr/bin/sudo -u "$CONSOLE_USER" \
-        /usr/bin/open -a "$APP" || echo "WARN: could not launch the app"
+    if /bin/launchctl print "gui/$CONSOLE_UID/$AGENT_LABEL" 2>/dev/null \
+            | /usr/bin/grep -q 'state = running'; then
+        /bin/launchctl kickstart -k "gui/$CONSOLE_UID/$AGENT_LABEL" \
+            && echo "restarted the running $AGENT_LABEL" \
+            || echo "WARN: could not restart $AGENT_LABEL"
+    else
+        # Whole command line anchored on the exact path: MoonlightWeb and
+        # MoonlightWebDev never match each other.
+        PATTERN="^$EXE( |\$)"
+        if /usr/bin/pgrep -u "$CONSOLE_UID" -f "$PATTERN" >/dev/null; then
+            /usr/bin/pkill -TERM -u "$CONSOLE_UID" -f "$PATTERN"
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                /usr/bin/pgrep -u "$CONSOLE_UID" -f "$PATTERN" >/dev/null || break
+                /bin/sleep 0.5
+            done
+            /usr/bin/pkill -KILL -u "$CONSOLE_UID" -f "$PATTERN" 2>/dev/null
+            echo "stopped the running $APP_NAME"
+        fi
+        /bin/launchctl asuser "$CONSOLE_UID" /usr/bin/sudo -u "$CONSOLE_USER" \
+            /usr/bin/open -a "$APP" || echo "WARN: could not launch the app"
+    fi
 fi
 
 # ── Cleanup: the hand-off is short-lived by design; it no longer carries any
