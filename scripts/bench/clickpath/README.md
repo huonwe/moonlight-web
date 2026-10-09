@@ -84,6 +84,22 @@ present for the picture that carried it: the two agree when ~0), `handoff`,
 beside the pass writes `<tag>.re9.txt`, whose `scene from here` and `scene to
 here` lines bound the frames counted.
 
+## A, on the client's clock — clicksplit.py
+
+`hostpath.py` splits the host's share on the host's clock. `clicksplit.py`
+splits the whole click at the capture, on the client's clock: click → capture
+(the way up and the host) and capture → drawn (encode, way down, decode, draw),
+for the frame that showed the flag (the probe since 652fc726). Means add up to
+the click's; medians do not. A glob pools passes (ABBA arms):
+
+```
+python scripts/bench/clickpath/clicksplit.py "al2-lx-vdd120-r*" "al2-lx-vdd240-r*"
+```
+
+The probe clicks at a random phase of the host's refresh since 5c96775d: before
+it, a click left right after a sampled picture, at one phase of a host that
+paces its frames on a vblank (design §9.4).
+
 ## A, the stream's gate — gatesim.py
 
 The host encodes only the presents its gate admits (`core/FrameCadence.h`).
