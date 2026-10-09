@@ -154,10 +154,14 @@ protected:
             ssl->ignoreSslErrors();
         });
 
-        connect(ssl, &QAbstractSocket::errorOccurred, this, [ssl](QAbstractSocket::SocketError) {
-            Logger::warning("[HTTPS] Socket error: " + ssl->errorString());
-            ssl->deleteLater();
-        });
+        connect(ssl, &QAbstractSocket::errorOccurred, this,
+                [ssl](QAbstractSocket::SocketError error) {
+                    // A kept-alive connection is usually closed by the browser,
+                    // between two requests: nothing went wrong.
+                    if (error != QAbstractSocket::RemoteHostClosedError)
+                        Logger::warning("[HTTPS] Socket error: " + ssl->errorString());
+                    ssl->deleteLater();
+                });
 
         // Non-blocking SNI selection: peek the ClientHello once it arrives (via
         // readyRead) instead of blocking the accept thread with waitForReadyRead.
@@ -531,6 +535,7 @@ void HttpServer::stop()
     }
     m_Buffers.clear();
     m_PendingAsyncSockets.clear();
+    m_RequestIds.clear();
 }
 
 QTcpServer* HttpServer::createHttpsServer(quint16 port)
@@ -904,6 +909,10 @@ void HttpServer::onReadyReadSocket(QTcpSocket* socket)
 {
     m_Buffers[socket].append(socket->readAll());
 
+    // One request at a time on a connection: what a client sends before its
+    // answer waits in the buffer, and sendResponse() picks it up.
+    if (m_PendingAsyncSockets.contains(socket)) return;
+
     QByteArray& buffer = m_Buffers[socket];
     int headerEnd = buffer.indexOf("\r\n\r\n");
     if (headerEnd == -1) {
@@ -989,6 +998,7 @@ void HttpServer::onDisconnected()
         bool wasPending = m_PendingAsyncSockets.contains(socket);
         m_Buffers.remove(socket);
         m_PendingAsyncSockets.remove(socket);
+        m_RequestIds.remove(socket);
         if (wasPending) {
             qWarning() << "[HttpServer] onDisconnected — socket had pending async request!"
                        << "peer=" << socket->peerAddress().toString() << ":" << socket->peerPort()
@@ -1064,10 +1074,24 @@ void HttpServer::processRequest(QTcpSocket* socket, const QByteArray& requestDat
         }
     }
 
+    // Keep the connection for the browser's next request unless it asked to
+    // close. Until 09/10/2026 every response closed its connection, so a page
+    // load cost ~128 TLS connections, one per file; from DualRTX's Chrome, one
+    // of them to mw-mac (Wi-Fi) regularly never opened, and the module it
+    // carried stopped the whole page, blank. A kept-alive page needs ~6.
+    // HTTP/1.0 closes by default and is answered so.
+    const int lineEnd = requestData.indexOf("\r\n");
+    const bool http11 = requestData.left(lineEnd).trimmed().endsWith("HTTP/1.1");
+    const bool keepAlive =
+        http11 && !req.headers.value("connection").contains("close", Qt::CaseInsensitive);
+
     const QString hostHeader = req.headers.value("host");
+    const quint64 requestId = ++m_NextRequestId;
+    m_RequestIds[socket] = requestId;
+    stopIdleClose(socket);
     m_PendingAsyncSockets.insert(socket);
-    QTimer::singleShot(ASYNC_TIMEOUT_MS, socket, [this, socket]() {
-        if (m_PendingAsyncSockets.contains(socket)) {
+    QTimer::singleShot(ASYNC_TIMEOUT_MS, socket, [this, socket, requestId]() {
+        if (m_PendingAsyncSockets.contains(socket) && m_RequestIds.value(socket) == requestId) {
             qWarning() << "[HttpServer] Async timeout for" << socket
                        << "peer=" << socket->peerAddress().toString();
             m_PendingAsyncSockets.remove(socket);
@@ -1076,13 +1100,14 @@ void HttpServer::processRequest(QTcpSocket* socket, const QByteArray& requestDat
     });
 
     serveRequest(std::move(req), Arrival::Socket,
-                 [this, socket, hostHeader](const HttpResponse& resp) {
-                     if (m_PendingAsyncSockets.contains(socket)) {
+                 [this, socket, hostHeader, requestId, keepAlive](const HttpResponse& resp) {
+                     if (m_PendingAsyncSockets.contains(socket) &&
+                         m_RequestIds.value(socket) == requestId) {
                          m_PendingAsyncSockets.remove(socket);
-                         sendResponse(socket, resp, hostHeader);
+                         sendResponse(socket, resp, hostHeader, keepAlive);
                      } else {
-                         // The socket is no longer pending because it disconnected
-                         // mid-request: onDisconnected() already did
+                         // This request was answered by the timeout (which closes),
+                         // or the socket disconnected mid-request: onDisconnected() did
                          // socket->deleteLater(), so by the time this async response
                          // arrives the QTcpSocket is a FREED QObject. Stream its
                          // ADDRESS as a plain void* — never the QObject* itself,
@@ -1499,6 +1524,10 @@ void HttpServer::handleWebSocketUpgrade(QTcpSocket* clientSocket, const QByteArr
     // Remove from our tracking — HttpServer should no longer manage this socket.
     m_Buffers.remove(clientSocket);
     m_PendingAsyncSockets.remove(clientSocket);
+    m_RequestIds.remove(clientSocket);
+    // A kept-alive connection may upgrade after other requests: its idle close
+    // must not cut the WebSocket it has become.
+    stopIdleClose(clientSocket);
 
     // Disconnect HttpServer's handlers from this socket so they don't interfere
     // with the bidirectional proxy.
@@ -1567,7 +1596,7 @@ void HttpServer::handleWebSocketUpgrade(QTcpSocket* clientSocket, const QByteArr
 }
 
 void HttpServer::sendResponse(QTcpSocket* socket, const HttpResponse& response,
-                              const QString& hostHeader)
+                              const QString& hostHeader, bool keepAlive)
 {
     // Only log failures — per-request logging floods the console with the
     // periodic /api/hosts polling.
@@ -1604,7 +1633,13 @@ void HttpServer::sendResponse(QTcpSocket* socket, const HttpResponse& response,
     // Defaults first, then the handler's own headers on top: a handler that sets
     // Cache-Control or a stricter policy wins, and neither can be emitted twice.
     QMap<QString, QString> headers = securityHeaders(hostHeader);
-    headers["Connection"] = "close";
+    keepAlive = keepAlive && socket->state() == QAbstractSocket::ConnectedState;
+    if (keepAlive) {
+        headers["Connection"] = "keep-alive";
+        headers["Keep-Alive"] = QString("timeout=%1").arg(KEEPALIVE_IDLE_MS / 1000);
+    } else {
+        headers["Connection"] = "close";
+    }
 
     for (auto it = response.headers.cbegin(); it != response.headers.cend(); ++it)
         headers[it.key()] = it.value();
@@ -1630,5 +1665,41 @@ void HttpServer::sendResponse(QTcpSocket* socket, const HttpResponse& response,
 
     socket->write(respData);
     socket->flush();
-    socket->disconnectFromHost();
+    if (!keepAlive) {
+        socket->disconnectFromHost();
+        return;
+    }
+
+    armIdleClose(socket);
+    // A request that came in behind this one waited in the buffer (pipelining);
+    // take it up from the event loop rather than from inside this answer.
+    if (!m_Buffers.value(socket).isEmpty()) {
+        QTimer::singleShot(0, socket, [this, socket]() {
+            if (m_Buffers.contains(socket) && !m_PendingAsyncSockets.contains(socket))
+                onReadyReadSocket(socket);
+        });
+    }
+}
+
+void HttpServer::armIdleClose(QTcpSocket* socket)
+{
+    auto* idle =
+        socket->findChild<QTimer*>(QStringLiteral("mw-keepalive-idle"), Qt::FindDirectChildrenOnly);
+    if (!idle) {
+        idle = new QTimer(socket);
+        idle->setObjectName(QStringLiteral("mw-keepalive-idle"));
+        idle->setSingleShot(true);
+        idle->setInterval(KEEPALIVE_IDLE_MS);
+        connect(idle, &QTimer::timeout, socket, [this, socket]() {
+            if (!m_PendingAsyncSockets.contains(socket)) socket->disconnectFromHost();
+        });
+    }
+    idle->start();
+}
+
+void HttpServer::stopIdleClose(QTcpSocket* socket)
+{
+    if (auto* idle = socket->findChild<QTimer*>(QStringLiteral("mw-keepalive-idle"),
+                                                Qt::FindDirectChildrenOnly))
+        idle->stop();
 }

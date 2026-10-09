@@ -30,8 +30,8 @@
  * handshake or request parsing cost:
  *
  *   1. Connection flood   — too many new TCP connections per IP per window.
- *      Note: the server closes the socket after every response
- *      (Connection: close), so a single legitimate page load is already a
+ *      Note: a client that asks for Connection: close (or speaks HTTP/1.0)
+ *      gets a socket per response, so a legitimate page load can still be a
  *      burst of dozens of connections from one IP. The threshold is therefore
  *      generous; it targets true floods, not normal browsing.
  *
