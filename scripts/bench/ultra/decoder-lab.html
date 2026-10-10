@@ -14,12 +14,13 @@
       // with the oracle's own decode (max code difference, PSNR) and with the source
       // clip, then times the GPU decode of one frame `timing` times. The result is
       // left in window.__labResult. &api=webgl2 runs the WebGL2 fallback instead.
-      // WebGPU only: &idwt=1 the first inverse wavelet shader (2, the
-      // default, gives the same values faster), &fp16=0 every plane in f32
+      // WebGPU only: &idwt=2|1 an older inverse wavelet shader (they give the
+      // values of 3, the default, more slowly), &fp16=0 every plane in f32
       // (the default keeps the two finest levels in FP16), &cmp=1 the planes
-      // and the 8-bit frame against the first shader's in f32, &split=1 each
-      // stage timed alone, &bw=1 the GPU's memory bandwidth, &present=1 the
-      // product's presentation checked once, then timed.
+      // and the 8-bit frame against the first shader's in f32 (or against
+      // &cmpidwt=, &cmpfp16=1), &split=1 each stage timed alone, &bw=1 the
+      // GPU's memory bandwidth, &present=1 the product's presentation checked
+      // once, then timed.
       import { PyroWaveDecoder } from "/frontend/js/stream/ultra/PyroWaveDecoder.js";
 
       const q = new URLSearchParams(location.search);
@@ -44,9 +45,15 @@
       // (their sum: the decode by slices, against a whole frame's).
       const slices = Number(q.get("slices") || 0);
       // The inverse wavelet's shader (PyroWaveDecoder's idwt option).
-      const idwt = Number(q.get("idwt") || 2);
+      const idwt = Number(q.get("idwt") || 3);
       // The two finest levels in FP16 (PyroWaveDecoder's fp16 option).
       const fp16 = q.get("fp16") !== "0";
+      // What &cmp=1 compares with: by default shader 1 in f32, else
+      // &cmpidwt=, &cmpfp16=1 (the same options as above).
+      const cmpOpts = {
+        idwt: Number(q.get("cmpidwt") || 1),
+        fp16: q.get("cmpfp16") === "1",
+      };
       // The timed loop with each stage in a pass of its own, each timed:
       // dequant, every level of the inverse wavelet, pack.
       const split = q.get("split") === "1";
@@ -164,9 +171,7 @@
         });
         // The planes (Y, Cb, Cr) of both decoders and the reference's 8-bit
         // frame, read back.
-        const ref1 = cmp
-          ? new PyroWaveDecoder(device, w, h, { idwt: 1, fp16: false })
-          : null;
+        const ref1 = cmp ? new PyroWaveDecoder(device, w, h, cmpOpts) : null;
         const ranges = ref1 ? [dec.planesRange(), ref1.planesRange()] : null;
         const mapped = (size) =>
           device.createBuffer({
@@ -602,9 +607,10 @@
           slices,
           piecesSumMs: q50(piecesSum),
           piecesSpanMs: q50(piecesSpan),
-          idwt,
+          idwt: dec.idwtVersion,
           fp16: dec.fp16,
           split: splitMs,
+          cmpWith: ref1 ? { idwt: ref1.idwtVersion, fp16: ref1.fp16 } : null,
           planeDiff: ref1 ? planeDiff : null,
           codeDiff: ref1 ? codeDiff : null,
           codesOffPct: ref1

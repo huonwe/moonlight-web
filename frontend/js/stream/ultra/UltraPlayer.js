@@ -62,13 +62,14 @@ const PART_STAMPS = 62;
 // A query set resolves at a multiple of 256 bytes.
 const RESOLVE_STRIDE = 256;
 
-// Bench switch (localStorage mw_ultra_idwt=1): the decoder's first inverse
-// wavelet shader, which gives the same values more slowly, for an A/B.
+// Bench switch (localStorage mw_ultra_idwt=2 or 1): an older inverse wavelet
+// shader of the decoder, which gives the same values more slowly, for an A/B.
 function idwtVersion() {
     try {
-        return globalThis.localStorage?.getItem('mw_ultra_idwt') === '1' ? 1 : 2;
+        const v = globalThis.localStorage?.getItem('mw_ultra_idwt');
+        return v === '1' ? 1 : v === '2' ? 2 : 3;
     } catch {
-        return 2;
+        return 3;
     }
 }
 

@@ -69,10 +69,13 @@ def main():
     ap.add_argument("--present", action="store_true", help="check the product's presentation path once")
     ap.add_argument("--power", default="high-performance", help="the adapter asked for: high-performance or low-power")
     ap.add_argument("--api", default="webgpu", help="webgpu, or webgl2 for the fallback decoder")
-    ap.add_argument("--idwt", type=int, default=2,
-                    help="the inverse wavelet's shader (WebGPU): 2, or 1 for the first, slower one")
+    ap.add_argument("--idwt", type=int, default=3,
+                    help="the inverse wavelet's shader (WebGPU): 3, or 2 without the fast load of the tiles inside "
+                         "the level, or 1 for the first one (the same values, more slowly)")
     ap.add_argument("--fp16", type=int, default=1,
-                    help="the two finest levels in FP16 (WebGPU, shader 2): 1, or 0 for every plane in f32")
+                    help="the two finest levels in FP16 (WebGPU, shaders 2-3): 1, or 0 for every plane in f32")
+    ap.add_argument("--cmp-idwt", type=int, default=1, help="--cmp against this shader (default 1)")
+    ap.add_argument("--cmp-fp16", type=int, default=0, help="--cmp against this storage (default f32)")
     ap.add_argument("--split", action="store_true",
                     help="time each stage alone, in a pass of its own: dequant, each level of the inverse wavelet, pack")
     ap.add_argument("--cmp", action="store_true", help="each frame's f32 planes against shader 1's")
@@ -122,10 +125,10 @@ def main():
             for mbps in a.mbps.split(","):
                 url = ("http://127.0.0.1:%d/scripts/bench/ultra/decoder-lab.html?clip=%s&mbps=%s&ref=%s"
                        "&frames=%d&timing=%d&stages=%s&warm=%d&power=%s&present=%d&api=%s&slices=%d"
-                       "&idwt=%d&fp16=%d&split=%d&cmp=%d&bw=%d"
+                       "&idwt=%d&fp16=%d&split=%d&cmp=%d&bw=%d&cmpidwt=%d&cmpfp16=%d"
                        % (http_port, clip, mbps, a.ref, a.frames, a.timing, a.stages, a.warm, a.power,
                           1 if a.present else 0, a.api, a.slices, a.idwt, a.fp16, 1 if a.split else 0,
-                          1 if a.cmp else 0, 1 if a.bw else 0))
+                          1 if a.cmp else 0, 1 if a.bw else 0, a.cmp_idwt, a.cmp_fp16))
                 call("Page.navigate", url=url)
                 # A slow client (a TV) takes seconds to load the module that sets it.
                 for _ in range(120):
@@ -147,6 +150,8 @@ def main():
                         print("  ", f)
                 g = res.get("gpuMs") or {}
                 label = res.get("stages", "") + (" /%d" % res["slices"] if res.get("slices") else "")
+                if res.get("idwt") is not None:
+                    label += " i%d" % res["idwt"]
                 if res.get("fp16") is not None:
                     label += " fp16" if res["fp16"] else " f32"
                 print("%-15s %4s Mbit/s %-12s %s  max diff Y %d C %d vs oracle (min PSNR %.1f dB), PSNR-Y vs "
@@ -169,9 +174,11 @@ def main():
                           % (res["presentMaxDiff"],
                              ", GPU p50 %.3f ms p99 %.3f ms" % (pg["p50"], pg["p99"]) if pg else ""))
                 if res.get("planeDiff") is not None:
-                    print("    idwt %d%s against idwt 1 in f32: max plane difference %.3g; 8-bit frame: max %d, "
+                    cw = res.get("cmpWith") or {"idwt": 1}
+                    print("    idwt %d%s against idwt %d%s: max plane difference %.3g; 8-bit frame: max %d, "
                           "%.3f %% of samples differ"
-                          % (res["idwt"], " fp16" if res.get("fp16") else "", res["planeDiff"], res["codeDiff"],
+                          % (res["idwt"], " fp16" if res.get("fp16") else " f32", cw["idwt"],
+                             " fp16" if cw.get("fp16") else " f32", res["planeDiff"], res["codeDiff"],
                              res["codesOffPct"]))
                 if res.get("split"):
                     sp = res["split"]

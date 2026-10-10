@@ -23,9 +23,10 @@
 //   f32, for the bench's A/B.
 // - The inverse wavelet works on 32x32 tiles in workgroup memory, like
 //   upstream's, but in one dispatch per level for all components. Its
-//   default shader (idwt2Wgsl) lifts in registers as upstream's does; the
-//   first port (IDWT_WGSL), which gives the same values twice as slowly on
-//   an AMD iGPU, stays for the bench's A/B.
+//   default shader (idwt2Wgsl, shader 3) lifts in registers as upstream's
+//   does, and loads the tiles inside the level without mirroring them. The
+//   same without that load (shader 2) and the first port (IDWT_WGSL), which
+//   give the same values more slowly, stay for the bench's A/B.
 //
 // Output: the decoded planes (Y at the aligned size, Cb and Cr at half of it,
 // before the DC shift), then `pack` turns them into 8-bit 4:2:0 bytes cropped
@@ -351,7 +352,129 @@ function lift(v, n) {
 // rows 2i and 2i + 1), then, after the row pass, two columns.
 // in16 / out16: the level's bands / its output are FP16 planes, two columns
 // a word; else f32, a word each.
-const idwt2Wgsl = (in16, out16) => /* wgsl */ `
+// fast (shader 3): a tile whose window lies inside the level, with nothing
+// to mirror, loads the runs of its row pass straight from the bands into
+// the registers, a word at a time, without the mirror's arithmetic and the
+// window's trip through S. The values are the same. The mirrored load was
+// most of the shader's instructions: an AMD iGPU's transform takes 40 % less.
+const idwt2Wgsl = (in16, out16, fast = false) => {
+    // The mirrored load of the whole window into S, any tile.
+    const mirrored = `for (var i = li; i < 20u * SPAN; i += 64u) {
+        let pair = i / SPAN;
+        let x = i - pair * SPAN;
+        let xOdd = (x & 1u) == 1u;
+        let col = u32(mirror(ox + i32(x), i32(w2)) >> 1);
+        let y = oy + i32(2u * pair);
+        let row0 = u32(mirror(y, i32(h2)) >> 1);
+        let row1 = u32(mirror(y + 1, i32(h2)) >> 1);
+        let sx = select(K, INV_K, xOdd);
+        let a = ld(select(bands.x, bands.y, xOdd), row0, col) * (sx * K);
+        let b = ld(select(bands.z, bands.w, xOdd), row1, col) * (sx * INV_K);
+        S[pair * PITCH + x] = vec2f(a, b);
+    }`;
+    // Words j < n at word offset `at` of the four bands, named <b><v><j>
+    // (b: ll, hl, lh, hh): two samples of a row in FP16, one in f32.
+    const words = (at, n, v) =>
+        lines(n, (j) =>
+            ['ll', 'hl', 'lh', 'hh']
+                .map(
+                    (b, k) =>
+                        `let ${b}${v}${j} = ${in16 ? 'unpack2x16float' : 'bitcast<f32>'}(coef[bands.${'xyzw'[k]} + ${at} + ${j}u]);`,
+                )
+                .join('\n    '),
+        );
+    // The registers v<k> of the run that word j fills: each sample at even
+    // then odd x, scaled as the mirrored load does (four from an FP16 word,
+    // two from an f32 one).
+    const entries = (j, v) => {
+        const pair = (h) => [
+            `vec2f(ll${v}${j}${h} * (K * K), lh${v}${j}${h} * (K * INV_K))`,
+            `vec2f(hl${v}${j}${h} * (INV_K * K), hh${v}${j}${h} * (INV_K * INV_K))`,
+        ];
+        const all = in16 ? [...pair('.x'), ...pair('.y')] : pair('');
+        return all.map((e, k) => `${v}${all.length * j + k} = ${e};`).join('\n    ');
+    };
+    // An interior tile's runs: r0-r15 (pairs 0-15, columns c0 + rx / 2 on)
+    // and, for the apron (pairs 16-19, columns c0 + qx / 2 on), q0-q11.
+    const runs = in16
+        ? `let at = (br + rp) * wrow + m0 + 2u * (li & 3u);
+        ${words('at', 4, 'r')}
+        ${lines(4, (j) => entries(j, 'r'))}
+        if (apron) {
+            let qat = (br + qp) * wrow + m0 + (li & 7u);
+            ${words('qat', 3, 'q')}
+            ${lines(3, (j) => entries(j, 'q'))}
+        }`
+        : `let at = (br + rp) * p.w + c0 + 4u * (li & 3u);
+        ${words('at', 8, 'r')}
+        ${lines(8, (j) => entries(j, 'r'))}
+        if (apron) {
+            let qat = (br + qp) * p.w + c0 + 2u * (li & 7u);
+            ${words('qat', 6, 'q')}
+            ${lines(6, (j) => entries(j, 'q'))}
+        }`;
+    const rows = fast
+        ? `
+    // Inside the level: band rows br .. br + 19, columns c0 = ox / 2 ..
+    // c0 + 19 (in FP16, words m0 .. m0 + 9 of a row of wrow).
+    let interior = ox >= 0 && oy >= 0 && ox + i32(SPAN) <= i32(w2) && oy + i32(SPAN) <= i32(h2);
+    let br = u32(max(oy, 0)) >> 1u;
+    ${in16 ? 'let wrow = p.w >> 1u;\n    let m0 = u32(max(ox, 0)) >> 2u;' : 'let c0 = u32(max(ox, 0)) >> 1u;'}
+
+    // Rows: pairs 0-15 by runs of 8 (all threads), pairs 16-19 by runs of 4
+    // (half of them). A run starts 4 samples before its outputs. Inside the
+    // level, a run comes straight from the bands (8 samples of each, 6 for
+    // the apron); else from the mirrored window in S.
+    let rp = li >> 2u;
+    let rx = 8u * (li & 3u);
+    let apron = li < 32u;
+    let qp = 16u + (li >> 3u);
+    let qx = 4u * (li & 7u);
+    ${lines(16, (k) => `var r${k}: vec2f;`)}
+    ${lines(12, (k) => `var q${k} = vec2f(0.0);`)}
+    if (interior) {
+        ${runs}
+    } else {
+        ${mirrored}
+        workgroupBarrier();
+        let rb = rp * PITCH + rx;
+        ${lines(16, (k) => `r${k} = S[rb + ${k}u];`)}
+        if (apron) {
+            let qb = qp * PITCH + qx;
+            ${lines(12, (k) => `q${k} = S[qb + ${k}u];`)}
+        }
+    }
+    ${lift('r', 16)}
+    if (apron) {
+        ${lift('q', 12)}
+    }
+    // An interior tile has read nothing from S.
+    if (!interior) { workgroupBarrier(); }`
+        : `
+    // The interleaved signal and its apron, 20 pairs of rows of 40, mirrored
+    // and scaled as IDWT_WGSL does. The mirror keeps parity (the tile starts
+    // even), so a sample's band follows from its place in the tile.
+    ${mirrored}
+    workgroupBarrier();
+
+    // Rows: pairs 0-15 by runs of 8 (all threads), pairs 16-19 by runs of 4
+    // (half of them). A run starts 4 samples before its outputs.
+    let rp = li >> 2u;
+    let rx = 8u * (li & 3u);
+    let rb = rp * PITCH + rx;
+    ${lines(16, (k) => `var r${k} = S[rb + ${k}u];`)}
+    ${lift('r', 16)}
+    let apron = li < 32u;
+    let qp = 16u + (li >> 3u);
+    let qx = 4u * (li & 7u);
+    ${lines(12, (k) => `var q${k} = vec2f(0.0);`)}
+    if (apron) {
+        let qb = qp * PITCH + qx;
+        ${lines(12, (k) => `q${k} = S[qb + ${k}u];`)}
+        ${lift('q', 12)}
+    }
+    workgroupBarrier();`;
+    return /* wgsl */ `
 struct Pass { w: u32, h: u32, comps: u32, y0: u32, bands: array<vec4u, 3>, outs: vec4u }
 @group(0) @binding(0) var<uniform> p: Pass;
 @group(0) @binding(1) var<storage, read_write> coef: array<u32>;
@@ -393,42 +516,7 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
     let ox = i32(wg.x * 32u) - 4;
     let ty = wg.y + p.y0;
     let oy = i32(ty * 32u) - 4;
-
-    // The interleaved signal and its apron, 20 pairs of rows of 40, mirrored
-    // and scaled as IDWT_WGSL does. The mirror keeps parity (the tile starts
-    // even), so a sample's band follows from its place in the tile.
-    for (var i = li; i < 20u * SPAN; i += 64u) {
-        let pair = i / SPAN;
-        let x = i - pair * SPAN;
-        let xOdd = (x & 1u) == 1u;
-        let col = u32(mirror(ox + i32(x), i32(w2)) >> 1);
-        let y = oy + i32(2u * pair);
-        let row0 = u32(mirror(y, i32(h2)) >> 1);
-        let row1 = u32(mirror(y + 1, i32(h2)) >> 1);
-        let sx = select(K, INV_K, xOdd);
-        let a = ld(select(bands.x, bands.y, xOdd), row0, col) * (sx * K);
-        let b = ld(select(bands.z, bands.w, xOdd), row1, col) * (sx * INV_K);
-        S[pair * PITCH + x] = vec2f(a, b);
-    }
-    workgroupBarrier();
-
-    // Rows: pairs 0-15 by runs of 8 (all threads), pairs 16-19 by runs of 4
-    // (half of them). A run starts 4 samples before its outputs.
-    let rp = li >> 2u;
-    let rx = 8u * (li & 3u);
-    let rb = rp * PITCH + rx;
-    ${lines(16, (k) => `var r${k} = S[rb + ${k}u];`)}
-    ${lift('r', 16)}
-    let apron = li < 32u;
-    let qp = 16u + (li >> 3u);
-    let qx = 4u * (li & 7u);
-    ${lines(12, (k) => `var q${k} = vec2f(0.0);`)}
-    if (apron) {
-        let qb = qp * PITCH + qx;
-        ${lines(12, (k) => `q${k} = S[qb + ${k}u];`)}
-        ${lift('q', 12)}
-    }
-    workgroupBarrier();
+${rows}
     // Back transposed: entry c * PITCH + y pairs the tile's columns 2c and
     // 2c + 1 of row y (the rows with their apron, 0-39).
     ${lines(4, (j) => `S[(rx / 2u + ${j}u) * PITCH + 2u * rp] = vec2f(r${4 + 2 * j}.x, r${5 + 2 * j}.x);`)}
@@ -456,6 +544,7 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
     }
 }
 `;
+};
 
 // The output planes (before the DC shift) to 8-bit 4:2:0, cropped: one thread
 // per 4 bytes of a row, rows of Y, then Cb, then Cr (the width must be a
@@ -557,15 +646,16 @@ export class PyroWaveDecoder extends PyroWaveFrame {
      * @param {number} width picture width (even)
      * @param {number} height picture height (even)
      * @param {{idwt?: number, fp16?: boolean}} [options] idwt: the inverse
-     *        wavelet's shader, 2 (idwt2Wgsl) or 1 (IDWT_WGSL, the same values,
-     *        slower, f32 only); fp16: the two finest levels and the output
-     *        planes stored in FP16 (shader 2), else everything in f32
+     *        wavelet's shader, 3 (idwt2Wgsl with its fast load), 2 (without
+     *        it) or 1 (IDWT_WGSL, f32 only), all giving the same values, 2 and
+     *        1 more slowly; fp16: the two finest levels and the output planes
+     *        stored in FP16 (shaders 2-3), else everything in f32
      */
-    constructor(device, width, height, { idwt = 2, fp16 = true } = {}) {
+    constructor(device, width, height, { idwt = 3, fp16 = true } = {}) {
         super(width, height);
         this.device = device;
-        this.idwtVersion = idwt === 1 ? 1 : 2;
-        this.fp16 = !!fp16 && this.idwtVersion === 2;
+        this.idwtVersion = idwt === 1 || idwt === 2 ? idwt : 3;
+        this.fp16 = !!fp16 && this.idwtVersion !== 1;
         this._gpuLayout();
         this._resources();
     }
@@ -646,7 +736,10 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         const idwtPipe = (in16, out16) => {
             const key = this.idwtVersion === 1 ? 'v1' : `${in16},${out16}`;
             if (!idwtPipes.has(key)) {
-                const code = this.idwtVersion === 1 ? IDWT_WGSL : idwt2Wgsl(in16, out16);
+                const code =
+                    this.idwtVersion === 1
+                        ? IDWT_WGSL
+                        : idwt2Wgsl(in16, out16, this.idwtVersion === 3);
                 idwtPipes.set(
                     key,
                     d.createComputePipeline({
