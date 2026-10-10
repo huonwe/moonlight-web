@@ -2315,6 +2315,119 @@ Ce que le labo dit :
   ms plus tôt.
 - Même ainsi, ce n'est qu'une part des ~4,9 ms de retard sur le HEVC.
 
+### 6.32 Le nouvel iDWT sur le câble : −0,6 ms par tranches, −1 ms en images entières (10/10/2026, 02:28-03:12)
+
+Le banc des §6.29-6.30, avec le shader pour seul facteur :
+- l'UM790Pro sous Windows en client ;
+- la `--dev` de DualRTX sur l'écran virtuel du produit à 240 Hz, rendu par la
+  RTX ;
+- 120 i/s, relance allumée, PyroWave sur la route audio.
+
+`build\` a été recompilé à 02:27 sur `e2e46af4`. Il avait deux commits de
+retard, dont `7315bfcb` pour les candidats ICE.
+
+Cinq bras, en 19 passes de 60 clics (`scratchpad/pw120c/run-idwt.sh`) :
+- `h9` : le HEVC du produit par SCTP, au début, au milieu et à la fin de la
+  série ;
+- `ko` / `kn` : PyroWave par tranches de 16 Kio, ancien / nouveau shader
+  (`mw_ultra_idwt=1` / `2`) ;
+- `wo` / `wn` : PyroWave en images entières, ancien / nouveau shader.
+
+Chaque mode a deux ABBA, le second en BAAB. Les 16 passes PyroWave ont pris
+le shader demandé, comme l'indique le résumé du lecteur. Toutes les passes ont
+pris le LAN direct (la paire IPv6 interne). Aucun TDR (événement 4101) sur les
+deux PC.
+
+Les rapports sont dans le scratchpad (`pw120c/` : `relaydrawn.py`,
+`report.py`, `backlog.py`, `pieces.py`, `slicesum.py`), plus `gpuwait.py`.
+
+Du relais au dessin (en ms : moyenne des médianes de chaque passe ; entre
+crochets, la plus basse et la plus haute) :
+
+| Bras | relais → arrivée | relais → dessin, p50 | moyenne | p90 |
+|---|---|---|---|---|
+| HEVC (SCTP) | 0,86 | 1,52 [1,51-1,52] | 1,67 | 2,04 |
+| tranches, ancien | 3,32 | 6,79 [6,56-7,01] | 7,69 | 10,77 |
+| tranches, nouveau | 3,33 | 6,21 [6,09-6,43] | 6,99 | 9,37 |
+| entières, ancien | 3,37 | 7,77 [7,27-8,22] | 8,42 | 11,16 |
+| entières, nouveau | 3,38 | 6,78 [6,28-7,17] | 7,33 | 9,41 |
+
+Le décodage sur le GPU de la 780M (horloge du GPU, médianes en ms) :
+
+| Étape | Ancien | Nouveau |
+|---|---|---|
+| image entière : passe de décodage | 1,77 | 1,07 |
+| image entière : passe d'affichage | 0,31 | 0,31 |
+| image entière : soumission → fin (horloge de la page), p50 / p90 | 3,3-3,9 / 4,5-5,1 | 2,6 / 3,5-3,7 |
+| tranches : le morceau lourd, 7e sur 10 | 1,24-1,26 | 0,79 |
+| tranches : les morceaux et la passe finale, par image | 1,84-1,89 | 1,28 |
+| tranches : dernière soumission → fin du dernier morceau | 1,41-1,96 | 1,03-1,50 |
+| dont le morceau lourd encore en cours | 1,09-1,15 | 0,73-0,78 |
+
+Les clics (`report.py`, en ms ; 180 clics pour le HEVC, 240 par bras
+PyroWave) :
+
+| Bras | Clic p50 | Moyenne | p90 | Capture → dessin hors des clics, moyenne |
+|---|---|---|---|---|
+| HEVC (SCTP) | 10,4 | 9,9 | 13,9 | 3,7 |
+| tranches, ancien | 15,8 | 17,3 | 23,2 | 9,3 |
+| tranches, nouveau | 15,5 | 16,3 | 21,9 | 8,6 |
+| entières, ancien | 17,3 | 17,5 | 22,7 | 10,0 |
+| entières, nouveau | 15,8 | 16,8 | 22,8 | 9,1 |
+
+Ce que la série dit :
+- **Le gain du labo se retrouve en entier.** En images entières, la passe de
+  décodage tombe de 1,77 à 1,07 ms. C'est exactement le labo sans sa
+  conversion en 8 bits (1,98 − 0,21 et 1,28 − 0,21, §6.31). Dans le flux, la
+  780M décode donc à la vitesse du labo. Du relais au dessin, l'image gagne
+  1,0 ms en médiane, 1,1 en moyenne et 1,75 au p90. C'est plus que les 0,7 ms
+  du GPU, car la queue de l'attente raccourcit aussi.
+- **Par tranches, −0,6 ms en médiane, −0,7 en moyenne, −1,4 au p90.** Le
+  morceau lourd passe de 1,24 à 0,79 ms, et la dernière soumission attend
+  d'autant moins. Les deux bras ne se recouvrent pas : la passe la plus lente
+  du nouveau shader (6,43 ms) bat la plus rapide de l'ancien (6,56). C'est
+  pareil en images entières (7,17 contre 7,27).
+- **L'arrivée ne bouge pas** : 3,3-3,4 ms du relais à l'arrivée, dans les quatre
+  bras. Tout le gain vient du décodage.
+- **Le clic suit, en plus petit et plus bruité.** Il gagne 1,0 ms en moyenne
+  par tranches et 0,7 en images entières. Hors des clics, la capture → dessin
+  gagne 0,7-0,9 ms en moyenne.
+- **Le morceau lourd du §6.30 porte plus que le niveau 1.** Dans le flux, le
+  GPU ne va pas plus lentement qu'au labo : les images entières le montrent.
+  Le nouveau shader gagne 0,45 ms sur ce morceau. Comme il divise l'iDWT par
+  deux, le morceau porte ~0,9 ms d'iDWT avec l'ancien shader : tout le niveau
+  1 (0,52 ms au labo) et à peu près la moitié du niveau 0. Il reste ~0,34 ms
+  qui ne dépendent pas du shader, autant que la déquantification d'une image
+  entière au labo.
+  - Hypothèse, non vérifiée : quand le niveau 1 se complète, la frontière
+    règle d'un coup les rangées du niveau 0 encore sans bloc. Leurs blocs sont
+    alors déquantifiés et transformés avec lui.
+- **Le découpage coûte plus au nouveau shader.** Par tranches, les morceaux et
+  la passe finale font 1,28 ms de GPU par image, contre 1,07 pour l'image
+  entière (+0,21). L'ancien shader ne perdait que 0,08 ms (1,84-1,89 contre
+  1,77). Je n'ai pas cherché la cause. Une piste : les bandes du niveau 0 sont
+  de petits dispatches, que les groupes de 64 threads remplissent moins que
+  les 256 de l'ancien.
+- **Les tranches gagnent moins qu'avant.** Avec le nouveau shader, elles battent
+  l'image entière de 0,57 ms (6,21 contre 6,78), contre 0,98 avec l'ancien.
+  L'image entière du nouveau shader vaut les tranches de l'ancien.
+- **La relance tourne moins** : 8,0-9,9 commandes vides par attente, au lieu de
+  9,8-13,4.
+
+**Verdict.** Le nouveau shader reste le défaut. Du relais au dessin, PyroWave
+reste à ~4,7 ms du HEVC du produit (6,21 contre 1,52 en médiane), et à 6,4 ms
+au clic moyen. Cet écart se compose de :
+- l'arrivée : +2,5 ms (3,33 contre 0,86) ;
+- la page après l'arrivée : +2,2 ms (2,88 contre 0,66).
+
+Les leviers suivants :
+- **le FP16 des deux niveaux fins**, comme l'amont : −0,3 à −0,5 ms estimées
+  sur la 780M ;
+- **le surcoût du découpage** avec le nouveau shader : 0,21 ms de GPU par
+  image ;
+- **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
+  de Bruno.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
