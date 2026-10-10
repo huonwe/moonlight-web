@@ -2660,6 +2660,99 @@ Les leviers suivants :
 - **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
   de Bruno.
 
+### 6.35 L'iDWT sur AMD : les tuiles intérieures lues sans miroir, −40 % (10/10/2026, 07:20-07:38)
+
+Le premier levier du §6.34, au labo, sans stream ni écran virtuel. Il tourne
+dans le Chrome headless de `decoder_lab.py` : sur SwiftShader d'abord, puis sur
+les quatre GPU l'un après l'autre (banc donné par 59). Aucun TDR.
+
+**Ce qui retenait l'iDWT sur AMD.** Le §6.33 n'y trouvait aucune part
+dominante. J'ai compté les instructions du shader 2, à la main et sans
+profileur. La lecture de la fenêtre de 40×40 en fait environ les deux tiers :
+- chaque échantillon y coûte trois miroirs, le choix de sa bande et, en FP16,
+  le choix d'une moitié de mot ;
+- chaque mot FP16 y est lu deux fois ;
+- le levage, lui, n'en fait qu'un sixième.
+
+Les variantes du §6.33 le montraient déjà : sans lire les bandes, mais avec les
+mêmes calculs d'adresse, le shader ne gagnait que 15 %.
+
+**Le changement** (`ec7d7ea5`) :
+- Une tuile dont la fenêtre tient dans le niveau n'a rien à refléter. Elle lit
+  ses bandes un mot à la fois : deux échantillons d'une ligne en FP16, un en
+  f32. Les valeurs vont directement dans les registres du passage des lignes,
+  sans calcul de miroir, sans passer par la mémoire du groupe, avec une
+  barrière de moins.
+- Les tuiles du bord gardent l'ancienne lecture. En 1080p, 91 % des tuiles du
+  niveau 0 sont intérieures, et 82 % de celles du niveau 1.
+- C'est le shader 3, désormais le défaut. Il donne les mêmes plans que le
+  shader 2, au bit près : sur SwiftShader et les quatre GPU, en image entière et
+  par tranches, en FP16 comme tout en f32.
+- `mw_ultra_idwt=2` (⚠️ collante) garde le shader 2 pour l'A/B, `=1` le
+  premier. Au labo, `--idwt 3` est le défaut ; `--cmp-idwt` et `--cmp-fp16`
+  choisissent ce à quoi `--cmp` compare.
+
+Shader 2 → 3, 1080p, `game10` et `text10` à 170 Mbit/s, p50 en ms. Chaque étape
+est mesurée seule, dans sa passe (`--split`), dans les deux ordres.
+
+| GPU | Niveau 1 | Niveau 0 | Niveaux 2-4 | iDWT, 5 niveaux | Passe de décodage du lecteur | Dernier de 11 morceaux |
+|---|---|---|---|---|---|---|
+| 780M (UM790Pro) | 0,262 → 0,160 | 0,345 → 0,181 | 0,124 → 0,105 | 0,732 → 0,446 | 0,88-0,90 → 0,60-0,62 | 0,184 → 0,116 |
+| iGPU AMD (2 CU) | 0,667 → 0,400 | 0,891 → 0,491 | 0,240 → 0,182 | 1,80 → 1,07 | −0,4 à −0,7 | 0,49 → 0,29 |
+| Arc A380 | 0,118 → 0,097 | 0,158 → 0,126 | 0,074 → 0,064 | 0,350 → 0,288 | 0,52-0,53 → 0,46-0,47 | 0,103 → 0,087 |
+| RTX 5060 Ti | 0,019 → 0,015 | 0,024 → 0,018 | 0,017 → 0,017 | 0,057 → 0,050 | 0,077 → 0,068 | 0,017 → 0,016 |
+
+- Le dernier morceau est celui de `game10`. Celui de `text10` passe de 0,116 à
+  0,078 ms sur la 780M.
+- Sur l'iGPU AMD, la passe de décodage n'est comparable qu'à l'intérieur d'une
+  même série. Sa déquantification varie en effet de 0,42 à 0,93 ms d'une passe
+  à l'autre. La première série donne 2,38-2,41 → 1,67-1,75 ms, la seconde
+  2,24-2,28 → 1,83-1,93.
+- En 11 morceaux sur la 780M, la somme des passes tombe de 1,07-1,09 à 0,80-0,83
+  ms.
+
+Deux autres variantes, essayées dans la même série, ne sont pas gardées :
+- **La même lecture par mots, mais vers la mémoire du groupe**, comme les
+  tuiles du bord. Elle gagne moins que la lecture vers les registres : 0,523 ms
+  sur la 780M, au lieu de 0,465 ms pour la lecture vers les registres des seuls
+  niveaux FP16. Sur l'Arc, elle ne gagne rien.
+- **La tuile en FP16 dans la mémoire du groupe**, comme l'amont
+  (`PYROWAVE_PRECISION=1`). Elle gagne encore jusqu'à 0,07 ms, mais sous D3D12
+  l'image s'écarte de 2 codes de l'oracle (49,5-57,7 dB au plus bas, contre
+  62,6-63,7) et perd 0,1-0,7 dB contre la source. Les quatre GPU donnent la
+  même image : c'est la conversion en FP16 de D3D12, qui arrondit sans doute
+  vers zéro (§6.33). Sur SwiftShader, elle reste à 1 code (−0,02 dB).
+
+Ce que le labo dit :
+- **Sur AMD, l'iDWT payait le calcul des adresses**, pas les octets ni le
+  levage. Sans ce calcul, il gagne 40 % sur les deux GPU AMD, 18 % sur l'Arc et
+  12 % sur la RTX.
+- **Les tuiles du bord sont la plus grosse part qui reste à la lecture.** Par
+  tuile, elles coûtent environ deux fois une tuile intérieure. J'estime, sur la
+  780M, qu'elles font 17 % du niveau 0 et 29 % du niveau 1, soit ~0,08 ms. Les
+  lire comme les autres en gagnerait ~0,04.
+- **Les petits niveaux tiennent à la latence** de leurs dispatches : niveaux 3
+  et 4 ensemble, ~0,045 ms sur la 780M, dont le shader 3 n'ôte que 0,005.
+- **Sur l'iGPU AMD, l'amont reste devant.** Il fait son iDWT en 0,7 ms en
+  Vulkan (§6.13), contre 1,07 pour nous.
+
+**Ce que le flux peut en attendre** (à mesurer sur le câble) :
+- Sur la 780M, en image entière : −0,27-0,29 ms sur la passe de décodage, donc
+  environ −0,3 ms du relais au dessin. Au §6.34, le gain du GPU s'est retrouvé
+  au moins tout entier dans le flux.
+- Par tranches : −0,07 ms au dernier morceau, un peu plus au morceau lourd.
+- Il resterait ~4,1 ms de retard sur le HEVC du produit.
+
+**Verdict.** Le shader 3 devient le défaut : il est plus rapide sur les quatre
+GPU, et ses plans sont identiques à ceux du shader 2. Sur la 780M, l'iDWT ne
+prend plus que 0,45 ms, et la passe de décodage ~0,6 ms, des ~2,95 ms que la
+page met après l'arrivée (§6.34). Les leviers suivants :
+- **la page après l'arrivée** : B2.1, jugé en bout de chaîne. C'est le plus
+  gros poste qui reste dans la page ;
+- **les tuiles du bord** (~0,04 ms) et le surcoût des morceaux passent après ;
+- **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
+  de Bruno.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
