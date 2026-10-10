@@ -2753,6 +2753,119 @@ page met après l'arrivée (§6.34). Les leviers suivants :
 - **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
   de Bruno.
 
+### 6.36 Le shader 3 sur le câble : −0,5 ms par tranches, presque rien en images entières (10/10/2026, 07:50-08:34)
+
+Le banc du §6.34, avec le shader de l'iDWT pour seul facteur
+(`mw_ultra_idwt=2` / `3`) :
+- l'UM790Pro sous Windows en client ;
+- la `--dev` de DualRTX sur l'écran virtuel du produit à 240 Hz, rendu par la
+  RTX ;
+- 120 i/s, relance allumée, FP16 sur toutes les passes ;
+- PyroWave sur la route audio.
+
+`build\` date toujours de 02:27 : depuis, seuls le JS du lecteur et la doc ont
+changé. Accord de Bruno pour l'écran virtuel (« Go ») ; banc donné par 59.
+
+Cinq bras, en 19 passes de 60 clics (`scratchpad/pw120c/run-idwt3.sh`) :
+- `h11` : le HEVC du produit par SCTP, au début, au milieu et à la fin ;
+- `k2` / `k3` : PyroWave par tranches de 16 Kio, shader 2 / shader 3 ;
+- `w2` / `w3` : PyroWave en images entières, shader 2 / shader 3.
+
+Chaque mode a deux ABBA, le second en BAAB. Les 16 passes PyroWave ont pris le
+shader demandé, comme l'indique le résumé du lecteur. La dernière passe
+PyroWave laisse `mw_ultra_idwt=3`, le défaut, dans le Chrome de banc. Aucun TDR
+(événement 4101) sur les deux PC.
+
+Du relais au dessin (en ms : moyenne des médianes de chaque passe ; entre
+crochets, la plus basse et la plus haute) :
+
+| Bras | relais → arrivée | relais → dessin, p50 | moyenne | p90 |
+|---|---|---|---|---|
+| HEVC (SCTP) | 0,87 | 1,54 [1,52-1,55] | 1,69 | 2,07 |
+| tranches, shader 2 | 3,17 | 5,82 [5,34-6,17] | 6,48 | 8,85 |
+| tranches, shader 3 | 3,17 | 5,32 [5,05-5,75] | 6,04 | 7,99 |
+| entières, shader 2 | 2,96 | 5,80 [5,70-5,92] | 6,43 | 8,24 |
+| entières, shader 3 | 2,92 | 5,73 [5,49-5,98] | 6,26 | 7,88 |
+
+Le décodage sur le GPU de la 780M (horloge du GPU, médianes en ms) :
+
+| Étape | Shader 2 | Shader 3 |
+|---|---|---|
+| image entière : passe de décodage | 0,88 | 0,60 |
+| image entière : du début du GPU à sa fin | 1,25 | 0,97 |
+| image entière : soumission → fin (horloge de la page), p50 | 2,3 | 2,0-2,4 |
+| tranches : le morceau lourd | 0,65 | 0,41 |
+| tranches : les morceaux et la passe finale, par image | 1,07 | 0,79 |
+| tranches : dernière soumission → fin du dernier morceau, moyenne | 0,86-1,22 | 0,59-0,90 |
+
+Les clics (`report.py`, en ms ; 180 clics pour le HEVC, 240 par bras
+PyroWave) :
+
+| Bras | Clic p50 | Moyenne | p90 | Capture → dessin hors des clics, moyenne |
+|---|---|---|---|---|
+| HEVC (SCTP) | 10,5 | 9,9 | 13,8 | 3,4 |
+| tranches, shader 2 | 14,8 | 15,5 | 20,7 | 8,1 |
+| tranches, shader 3 | 14,6 | 15,2 | 20,8 | 7,8 |
+| entières, shader 2 | 14,5 | 15,3 | 20,3 | 8,4 |
+| entières, shader 3 | 14,6 | 15,1 | 20,1 | 7,9 |
+
+Ce que la série dit :
+- **Le GPU fait au câble ce qu'il faisait au labo.** La passe de décodage
+  tombe de 0,88 à 0,60 ms (labo : 0,89 → 0,61). Par tranches, les morceaux et
+  la passe finale passent de 1,07 à 0,79 ms, et le morceau lourd de 0,65 à
+  0,41.
+- **Par tranches, l'image gagne 0,5 ms**, plus que le GPU (0,28 ms) : −0,50 en
+  médiane dans chacun des deux ABBA, −0,44 en moyenne, −0,86 au p90.
+  - Après la dernière soumission, le GPU a moins de retard à rattraper sur le
+    morceau lourd. L'attente jusqu'à la fin du dernier morceau tombe de 1,0 à
+    0,7 ms en moyenne.
+  - Dans chaque ABBA, les deux passes du shader 3 sont devant les deux du
+    shader 2. D'un ABBA à l'autre, les deux bras se touchent : le second ABBA
+    est plus rapide pour les deux (`k2` 5,34 contre `k3` 5,41-5,75 au premier).
+- **En images entières, l'image ne gagne presque rien** : −0,07 ms en médiane,
+  −0,17 en moyenne, −0,35 au p90. Le premier ABBA gagne 0,20 ms, le second en
+  perd 0,06.
+  - La soumission → fin tombe de 2,3 à 2,0 ms la plupart du temps. Mais dans
+    deux des quatre passes du shader 3, elle remonte à 2,5-2,8 ms pendant 20 à
+    40 s.
+  - Pendant ces phases, le travail du GPU ne bouge pas (0,60 ms) : c'est
+    l'attente avant que le GPU démarre et après qu'il a fini qui s'allonge.
+  - Les passes `k2` en montrent aussi, en tranches avec le shader 2. Ces phases
+    ne viennent donc pas du shader 3. Je n'en ai pas trouvé la cause : elle est
+    du côté de Chrome ou du pilote, pas du shader.
+  - Les deux passes du shader 3 sans ces phases (5,49 et 5,58 ms) sont devant
+    les quatre du shader 2 (5,70-5,92).
+- **Les tranches repassent devant**, avec le shader 3 : 5,32 contre 5,73 ms en
+  médiane, 6,04 contre 6,26 en moyenne. Au p90, l'image entière reste un peu
+  meilleure (7,88 contre 7,99). Au §6.34, avec le shader 2, les deux se
+  valaient.
+- **Le clic bouge peu** : −0,2 à −0,3 ms en moyenne dans les deux modes, moins
+  que le bruit d'une passe à l'autre.
+
+**Verdict.** Le shader 3 reste le défaut. Il gagne dans les deux modes, et
+surtout par tranches. Du relais au dessin, PyroWave reste derrière le HEVC du
+produit :
+- par tranches, à ~3,8 ms en médiane (5,32 contre 1,54), le meilleur écart
+  mesuré jusqu'ici ;
+- en images entières, qui sont le défaut du lecteur, à ~4,2 ms ;
+- à ~5,2 ms au clic moyen (15,1-15,2 contre 9,9). Le HEVC a cliqué plus vite
+  qu'au §6.34 (9,9 contre 10,6 ms), PyroWave à peine.
+
+Par tranches, l'écart se compose de :
+- l'arrivée : +2,3 ms (3,17 contre 0,87) ;
+- la page après l'arrivée : +1,5 ms (2,15 contre 0,67).
+
+Les leviers suivants :
+- **le bout de chaîne** : juger à l'écran du client, et y départager les
+  tranches et l'image entière. Les tranches (`mw_ultra_slices=1`) restent
+  éteintes par défaut jusque-là ;
+- **B2.1**, jugé au même endroit ;
+- **les phases lentes de la soumission → fin**, à surveiller : elles mangent le
+  gain du GPU en image entière ;
+- **les tuiles du bord** (~0,04 ms) et le surcoût des morceaux passent après ;
+- **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
+  de Bruno.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
