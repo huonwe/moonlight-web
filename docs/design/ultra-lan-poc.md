@@ -2428,6 +2428,121 @@ Les leviers suivants :
 - **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
   de Bruno.
 
+### 6.33 Les deux niveaux fins en FP16, au labo : −0,17 ms de décodage sur la 780M, l'iDWT d'AMD ne bouge pas (10/10/2026, 05:47-05:54)
+
+Le premier levier du §6.32, au labo d'abord, sans stream. Il tourne dans le
+Chrome headless de `decoder_lab.py` : sur SwiftShader d'abord, puis sur les
+quatre GPU l'un après l'autre (banc donné par 59). Aucun TDR.
+
+**Le changement** (`1c4d4626`) reprend le défaut de l'amont sur ordinateur
+(`PYROWAVE_PRECISION=1`) :
+- Les bandes des niveaux 0 et 1 et les plans de sortie sont stockés en FP16.
+  Les niveaux plus grossiers restent en f32, et tous les calculs se font en
+  f32.
+- Le stockage reste un tampon. Deux échantillons voisins d'une ligne tiennent
+  dans un mot de 32 bits (`pack2x16float`). Il n'y faut pas la fonction
+  `shader-f16` de WebGPU : le chemin marche partout.
+- La déquantification écrit quatre mots par sous-bloc dans un plan FP16.
+  L'iDWT existe en trois variantes, selon le stockage des bandes d'un niveau
+  et de sa sortie. L'affichage et la conversion du labo lisent l'un ou
+  l'autre.
+- `mw_ultra_fp16=0` (⚠️ collante) garde tout en f32, pour l'A/B. Le résumé du
+  lecteur dit lequel a tourné (`fp16`). L'ancien shader d'iDWT reste en f32
+  seulement.
+- Le labo gagne de quoi mesurer :
+  - `--fp16 0|1` choisit le stockage ;
+  - `--stages dequant+idwt` chronomètre la passe de décodage du lecteur ;
+  - par tranches, chaque morceau est chronométré, et leur somme donnée ;
+  - `--present` chronomètre aussi l'affichage ;
+  - `--cmp` compare aussi l'image 8 bits au chemin f32.
+
+**L'image reste juste.**
+- Sur les quatre GPU, elle reste à 1 code de l'oracle, comme en f32.
+- Le PSNR contre la source perd 0,03 dB sur `game10` (51,63 → 51,60) et
+  0,01 dB sur `text10`.
+- Contre le chemin f32, 1,6 % (`game10`) et 2,0 % (`text10`) des octets
+  bougent d'un code, jamais plus. Sur SwiftShader, ce n'est que 0,4-0,6 %.
+- Les quatre GPU, tous sous D3D12, donnent exactement la même image. Leur
+  conversion en FP16 arrondit sans doute vers zéro, celle de SwiftShader au
+  plus proche.
+- Par tranches (7, 11 et 16 morceaux), les écarts sont les mêmes qu'en image
+  entière.
+
+f32 → FP16, 1080p, `game10` à 170 Mbit/s, p50 en ms. `text10` donne les mêmes
+écarts.
+
+| GPU | Déquantification | iDWT niveau 1 | niveau 0 | iDWT, 5 niveaux | Passe de décodage du lecteur | Affichage |
+|---|---|---|---|---|---|---|
+| 780M (UM790Pro) | 0,337 → 0,164 | 0,264 → 0,262 | 0,344 → 0,345 | 0,730 → 0,732 | 1,068 → 0,894 | 0,307 → 0,230 |
+| iGPU AMD (2 CU) | 0,62-1,0 dans les deux cas | 0,695 → 0,665 | 0,895 → 0,889 | 1,83 → 1,80 | 2,50 → 2,27 | 0,583 → 0,550 |
+| Arc A380 | 0,284 → 0,180 | 0,178 → 0,119 | 0,272 → 0,158 | 0,531 → 0,351 | 0,813 → 0,531 | 0,230 → 0,175 (`text10`) |
+| RTX 5060 Ti | 0,038 → 0,021 | 0,024 → 0,019 | 0,031 → 0,024 | 0,072 → 0,059 | 0,105 → 0,078 | 0,020 → 0,020 |
+
+- Chaque étape est mesurée seule, dans sa propre passe (`--split`, deux fois,
+  dans les deux ordres : mêmes chiffres). La passe de décodage du lecteur est
+  la déquantification et l'iDWT d'un seul tenant.
+- La conversion en 8 bits du labo passe de 0,209 à 0,128 ms sur la 780M (Arc
+  0,242 → 0,117).
+- Par tranches, sur la 780M, il reste au dernier morceau 0,184 ms au lieu de
+  0,238 en 11 morceaux, et 0,160 au lieu de 0,207 en 16.
+
+Ce qui retient l'iDWT sur AMD, avec le FP16. Chaque variante de mesure (jamais
+committée) retire une part du travail. Elle passe sur SwiftShader d'abord.
+Niveau 1 / niveau 0, en ms :
+
+| Variante | iGPU AMD (2 CU) | 780M |
+|---|---|---|
+| le shader tel quel | 0,665 / 0,889 | 0,262 / 0,345 |
+| sans les contrôles de bornes de Dawn | 0,642 / 0,858 | — |
+| sans lire les bandes (mêmes calculs d'adresse) | 0,561 / 0,747 | 0,222 / 0,293 |
+| sans le levage | 0,560 / 0,745 | 0,232 / 0,307 |
+| sans le miroir des bords | 0,620 / 0,829 | 0,246 / 0,323 |
+
+Ce que le labo dit :
+- **Le FP16 gagne partout, mais pas là où je l'attendais sur AMD.**
+  - Sur la 780M, la déquantification va deux fois plus vite : elle était
+    limitée par ses écritures. L'affichage et la conversion gagnent aussi.
+  - L'iDWT ne bouge pas, ni sur la 780M ni sur l'iGPU AMD : sur AMD, ce ne
+    sont pas les octets qui le limitent.
+  - Sur l'Arc, l'iDWT tombe d'un tiers (0,531 → 0,351) : là, c'étaient les
+    octets.
+- **Mon estimation du §6.31 était fausse pour AMD.** J'y voyais le niveau 0
+  limité par la mémoire. Les 0,3-0,5 ms attendues sur la 780M se réduisent à
+  0,17 ms sur la passe de décodage et 0,08 sur l'affichage.
+- **Ce qui retient l'iDWT sur AMD reste à trouver.** Aucune part n'y domine :
+  - ne plus lire les bandes ne gagne que 15 % ;
+  - sans le levage, 11-16 % ;
+  - sans le miroir des bords, 6-7 % ;
+  - sans les contrôles de bornes, 3-4 %.
+  Le reste tient à la latence, à l'occupation des unités ou à la mémoire
+  partagée. Il faudrait un profileur (RGP) pour trancher.
+- **Le surcoût du découpage se retrouve au labo.** Sur la 780M, les passes de
+  11 morceaux font 1,286 ms en f32 et 1,069 en FP16. La passe de décodage d'un
+  seul tenant fait 1,068 et 0,894 : le surcoût est de +0,22 et +0,175 ms (le
+  câble disait +0,21, §6.32).
+  - Chaque morceau coûte environ 15 µs de GPU fixes sur la 780M et l'Arc, 4
+    sur la RTX.
+  - Hypothèse, non vérifiée : c'est la latence de petits dispatches, que leur
+    travail ne remplit pas.
+  - Ce surcoût ne pèse que là où le GPU est en retard sur les octets : autour
+    du morceau lourd, puis à la fin.
+
+**Ce que le flux peut en attendre** (à mesurer sur le câble) :
+- Sur la 780M, en image entière : environ −0,25 ms (décodage −0,17,
+  affichage −0,08).
+- Par tranches, un peu moins à la fin : le dernier morceau gagne ~0,05 ms,
+  l'affichage 0,08, et le morceau lourd une part de sa déquantification.
+- Il resterait ~4,5 ms de retard sur le HEVC du produit.
+
+**Verdict.** Le FP16 devient le défaut : il est plus rapide sur les quatre
+GPU, et l'image reste à 1 code de l'oracle. Les leviers suivants :
+- **l'iDWT sur AMD** : trouver ce qui le retient, au profileur, ou essayer
+  d'autres structures (bandes chargées par vecteurs, `textureGather` comme
+  l'amont) ;
+- **le surcoût des morceaux** : moins de dispatches près de la fin ;
+- **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
+  de Bruno.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
