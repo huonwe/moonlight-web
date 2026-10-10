@@ -294,6 +294,62 @@ def ultra_player(d, tag):
     return player
 
 
+def ticks_origin(d):
+    """The page's time origin on the browser's TimeTicks clock, in µs, or None
+    (MW_BENCH_TICKS_ORIGIN=1, POC Ultra U3.7, the end of the chain). Read from
+    marks the page sets during a short trace: a mark's trace event carries its
+    moment on TimeTicks, unclamped, and the page its startTime. On Windows
+    TimeTicks is QueryPerformanceCounter in µs, so a trace taken outside the
+    browser on that clock (PresentMon --qpc_time on the client) joins the
+    page's frame log: QPC µs = page ms × 1000 + this."""
+    import base64
+    import websocket
+    c = d.c
+    try:
+        c.call("Tracing.start", transferMode="ReturnAsStream",
+               traceConfig={"includedCategories": ["blink.user_timing"],
+                            "recordMode": "recordUntilFull"})
+        marks = d.json_eval("JSON.stringify([0, 1, 2, 3, 4].map(i => { const m = "
+                            "performance.mark('mw-ticks-' + i); return [m.name, m.startTime]; }))")
+        c.n += 1
+        c.ws.send(json.dumps({"id": c.n, "method": "Tracing.end"}))
+        stream, deadline = None, time.time() + 20
+        while stream is None and time.time() < deadline:
+            c.ws.settimeout(max(0.1, deadline - time.time()))
+            try:
+                msg = json.loads(c.ws.recv())
+            except websocket.WebSocketTimeoutException:
+                break
+            if msg.get("method") == "Tracing.tracingComplete":
+                stream = (msg.get("params") or {}).get("stream")
+        if not stream:
+            print("  ticks origin: the trace did not come back", flush=True)
+            return None
+        data = b""
+        while True:
+            r = c.call("IO.read", handle=stream, size=1 << 20)
+            chunk = r.get("data", "")
+            data += base64.b64decode(chunk) if r.get("base64Encoded") else chunk.encode()
+            if r.get("eof"):
+                break
+        c.call("IO.close", handle=stream)
+        trace = json.loads(data.decode("utf-8", "replace"))
+        events = trace.get("traceEvents", []) if isinstance(trace, dict) else trace
+        at = {e["name"]: e["ts"] for e in events
+              if str(e.get("name", "")).startswith("mw-ticks-") and "ts" in e}
+        offsets = sorted(at[n] - s * 1000 for n, s in marks if n in at)
+    except (Exception, SystemExit) as e:
+        print("  ticks origin: %s" % e, flush=True)
+        return None
+    if not offsets:
+        print("  ticks origin: no mark in the trace", flush=True)
+        return None
+    us = offsets[len(offsets) // 2]
+    print("  ticks origin: %.1f us (%d marks, spread %.1f us)" % (
+        us, len(offsets), offsets[-1] - offsets[0]), flush=True)
+    return {"us": us, "marks": len(offsets), "spreadUs": offsets[-1] - offsets[0]}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fps", type=int, default=0, help="stream_fps; 0 = Auto")
@@ -477,6 +533,7 @@ def main():
             # A still screen: the way up with almost no video coming down.
             uplink = uplink_runs(d, a.uplink, a.tag)
             clicks = click_flag(d, a.clicks, tag=a.tag) if a.clicks > 0 else None
+            ticks = ticks_origin(d) if os.environ.get("MW_BENCH_TICKS_ORIGIN") == "1" else None
             if target is rh and rh:
                 print("  " + rh.click_target_stop(os.path.join(age.OUT, a.tag + ".target.jsonl")),
                       flush=True)
@@ -488,7 +545,7 @@ def main():
                 json.dump({"tag": a.tag, "overlay": stats, "args": vars(a),
                            "uplink": uplink, "clicks": clicks,
                            "frameLog": json.loads(frame_log) if frame_log else None,
-                           "ultraPlayer": player,
+                           "ultraPlayer": player, "ticksOrigin": ticks,
                            "env": {k: os.environ.get(k, "")
                                    for k in ("MW_NATIVE_TUNING", "MW_VDD_REFRESH")}}, f)
             print("  held %d s; %s" % (a.hold, ((stats or {}).get("rows") or {}).get(
