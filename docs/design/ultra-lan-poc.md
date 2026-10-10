@@ -2866,6 +2866,118 @@ Les leviers suivants :
 - **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
   de Bruno.
 
+### 6.37 Le bout de chaîne, à l'écran du client : la sonde du clic retient l'image qu'elle mesure (10/10/2026, 09:27-10:13)
+
+Le banc du §6.36, avec trois changements :
+- **le flux à 119 i/s**, contre l'écran à 120 Hz du client (le M27Q de
+  l'UM790Pro, DISPLAY1). Le décalage entre l'arrivée des images et les
+  compositions du DWM fait alors un tour par seconde. Une moyenne sur les clics
+  n'est donc pas liée à une seule phase : à 120 i/s contre 120 Hz, cette phase
+  ne bouge presque pas pendant une passe, et chaque passe tomberait sur sa
+  propre marche de 8,3 ms (§6.5) ;
+- **un guetteur sur le client** : `mw-click-sound --tick` dans la session
+  console, sans clic à lui. Il trouve le drapeau de l'hôte dans la fenêtre par
+  ses couleurs et date chaque apparition sur le bureau composé, sur QPC ;
+- **l'origine de la page sur l'horloge de Chrome** (`MW_BENCH_TICKS_ORIGIN=1`,
+  `39089fe9`) : des repères `performance.mark` lus dans une courte trace CDP.
+  Sous Windows, cette horloge est QPC en µs. Vérifié sur DualRTX : l'heure de
+  la page ainsi recalée tombe entre deux lectures de QPC qui l'encadrent.
+  L'écart entre les cinq repères est de 15 à 112 µs, soit l'arrondi de
+  `performance.now()`.
+
+Accord de Bruno pour l'écran virtuel (« Go. Je te donne mon accord. ») ; banc
+donné par 59. Deux passes d'essai, puis 19 passes de 60 clics de la sonde
+(`scratchpad/pw120c/run-endchain.sh`, rapports `endqpc-report.txt`,
+`endsplit-report.txt`, `relaydrawn-endchain.txt`). Aucun TDR (événement 4101)
+sur les deux PC. Les bras :
+- `h12` : le HEVC du produit par SCTP, au début, au milieu et à la fin ;
+- `xw` : PyroWave en images entières, shader 3, FP16, relance allumée ;
+- `xk` : par tranches de 16 Kio ;
+- `xe` : `xw` avec `mw_ultra_early=1`, l'image remise à la soumission ;
+- `xn` : `xw` sans la relance.
+
+**Deux essais écartés.**
+- PresentMon (celui du pilote AMD) ne voit aucune présentation de Chrome :
+  Chrome compose par DirectComposition, sans `Present`. PresentMon ne voit que
+  les compositions du DWM.
+- Une lecture GDI d'un pixel de l'écran (`GetPixel`) attend la composition
+  suivante : 8,3 ms par lecture à 120 Hz, mesuré sur l'UM790Pro.
+  `click-photon.ps1` ne lit donc qu'une fois par composition, pas toutes les
+  ~1 ms comme le dit son README. Pour le guetteur, c'est un avantage : chaque
+  apparition est datée à la composition près (±0,5-0,8 ms autour de leur
+  grille), sans charger le GPU.
+
+Chaque passe a ses 60 clics vus à l'écran, 60 sur 60. Les phases des dessins
+se répartissent sur la période : entre 3 et 35 clics par quart de période.
+
+Du relais au dessin, sur toutes les images (médiane, en ms ; entre crochets,
+la plus basse et la plus haute des passes) :
+
+| Bras | relais → dessin |
+|---|---|
+| HEVC (SCTP) | 1,61 [1,57-1,65] |
+| entières | 5,72 [5,49-6,19] |
+| tranches | 5,48 [5,17-5,72] |
+| entières, `early` | 3,61 [3,49-3,96] |
+| entières, sans relance | 7,05 [7,00-7,09] |
+
+Du clic à l'écran (en ms ; 180 clics pour le HEVC, 240 par bras PyroWave) :
+- **clic → écran** : de l'horodatage du clic par la sonde, mis sur QPC, à
+  l'apparition du drapeau sur le bureau composé ;
+- **sonde** : son clic → dessin habituel ;
+- **relecture** : la durée du dessin de l'image du drapeau (`drawn − drawStart`
+  du journal des images), où la sonde relit le canevas.
+
+| Bras | Clic → écran, moyenne (erreur type) | Médiane | Passes | Sonde | Relecture | Début du dessin → écran |
+|---|---|---|---|---|---|---|
+| HEVC (SCTP) | 23,9 (0,5) | 23,9 | 24,0 / 23,1 / 24,5 | 10,7 | 4,1 | 13,2 |
+| entières | 28,2 (0,4) | 27,5 | 28,4 / 27,6 / 28,0 / 29,0 | 15,8 | 3,5 | 12,4 |
+| tranches | 28,3 (0,4) | 27,3 | 27,8 / 28,3 / 28,0 / 29,2 | 15,2 | 3,7 | 13,1 |
+| `early` | 28,3 (0,4) | 27,4 | 27,2 / 29,4 / 28,3 / 28,3 | 13,4 | 4,8 | 14,9 |
+| sans relance | 28,5 (0,4) | 28,3 | 28,1 / 29,3 / 28,5 / 28,3 | 16,2 | 3,8 | 12,3 |
+
+Ce que la série dit :
+- **La sonde du clic retient l'image qu'elle mesure.** Pour lire le drapeau,
+  elle dessine le canevas de sortie dans un petit canevas lu par le CPU
+  (`getImageData`). Cette relecture prend 3,5 à 4,8 ms sur la 780M, sur
+  l'image même dont on veut l'heure d'écran.
+  - Les images du drapeau mettent 4,0 à 4,6 ms de plus du relais au dessin que
+    les autres images de la même minute (HEVC 5,7 contre 1,7 ms ; images
+    entières 10,8 contre 6,3).
+  - Le clic de la sonde s'arrête avant cette relecture (`652fc726`). Le reste
+    de la chaîne, lui, la paie.
+- **À l'écran, ce que la sonde gagnait au dessin disparaît**, dans ces
+  conditions :
+  - `early` dessine 2,4 ms plus tôt au clic de la sonde (2,1 ms sur toutes les
+    images), et arrive à l'écran au même moment que `xw` (28,3 contre 28,2 ms).
+    Sa relecture est plus longue (4,8 contre 3,5 ms) : elle attend la fin du
+    travail du GPU que la page n'attend plus.
+  - La relance avance le dessin de 1,3 ms sur toutes les images, et de 0,4 ms
+    au clic de la sonde. À l'écran, l'écart est de 0,3 ms (28,2 contre 28,5),
+    moins que l'erreur type.
+  - Les tranches et l'image entière se valent à l'écran (28,3 contre 28,2).
+- **PyroWave est à ~4,3 ms du HEVC à l'écran** (28,2 contre 23,9), contre
+  ~5,1 ms au clic de la sonde (15,8 contre 10,7). La relecture du HEVC est plus
+  longue (4,1 contre 3,5 ms), ce qui réduit l'écart à l'écran. Ce chiffre
+  n'est donc pas encore celui d'un usage réel.
+- **De la fin de la relecture à l'écran, il faut ~9 ms en moyenne** dans tous
+  les bras (8,8-10,3) : une demi-période (4,2 ms), plus ~5 ms avant que l'image
+  puisse être composée. Ces ~5 ms sont le chemin de Chrome jusqu'au DWM, plus
+  le délai de composition du DWM. Le codec n'y change rien.
+
+**Verdict.** Cette série ne départage pas `early`, la relance et les tranches.
+La sonde est sur le chemin de l'image mesurée, et sa relecture attend le GPU :
+elle efface ce que ces leviers gagnent, ou une partie. Rien ne change dans le
+lecteur : les tranches, `early` et la relance restent des clés de banc, et le
+défaut reste l'image entière.
+
+**La mesure propre** : les clics donnés par le client lui-même (`SendInput`,
+`mw-click-sound --clicks`), la sonde de la page au repos, donc sans relecture,
+le même guetteur à l'écran et le flux à 119 i/s. Le journal des images de la
+page reste enregistré, pour le relais → dessin de toutes les images. Il faut
+pour cela que `pass.py` enregistre ce journal en mode `--hold`, et qu'il tienne
+le flux le temps des clics. Puis B2.1 au même endroit.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
