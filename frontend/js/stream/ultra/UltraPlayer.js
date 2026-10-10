@@ -72,6 +72,16 @@ function idwtVersion() {
     }
 }
 
+// Bench switch (localStorage mw_ultra_fp16=0): the decoder keeps all its
+// planes in f32 instead of the two finest levels in FP16, for an A/B.
+function fp16Storage() {
+    try {
+        return globalThis.localStorage?.getItem('mw_ultra_fp16') !== '0';
+    } catch {
+        return true;
+    }
+}
+
 function quantiles(xs) {
     if (!xs.length) return null;
     const s = Float64Array.from(xs).sort();
@@ -176,6 +186,7 @@ export class UltraPlayer {
         const out = {
             api: this.api || null,
             idwt: this.decoder?.idwtVersion ?? null,
+            fp16: this.decoder?.fp16 ?? null,
             stats: { ...this.stats },
             gpuTimestamps: !!this._querySet,
             early: this.early,
@@ -215,6 +226,7 @@ export class UltraPlayer {
         this.device.lost.then((info) => this.log('[MW-ULTRA] GPU device lost: ' + info.message));
         this.decoder = new PyroWaveDecoder(this.device, this.width, this.height, {
             idwt: idwtVersion(),
+            fp16: fp16Storage(),
         });
         this.canvas = new OffscreenCanvas(this.width, this.height);
         this.context = this.canvas.getContext('webgpu');
@@ -246,6 +258,7 @@ export class UltraPlayer {
                 this.height +
                 ', inverse wavelet ' +
                 this.decoder.idwtVersion +
+                (this.decoder.fp16 ? ', fine levels in FP16' : ', all in f32') +
                 (this._nudge ? ', nudged (' + this._nudge.mode + ')' : ''),
         );
         return true;

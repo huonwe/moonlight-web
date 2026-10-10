@@ -12,32 +12,55 @@
 // upstream GPU code, on purpose:
 // - No subgroup operation: the scans run on workgroup memory, so the decoder
 //   works where WebGPU has no `subgroups` (Safari, most mobiles).
-// - Coefficients live in one f32 storage buffer instead of FP16/FP32 images,
-//   and the inverse wavelet reads them by index. Upstream's mirrored sampler
+// - Coefficients live in one storage buffer instead of FP16/FP32 images, and
+//   the inverse wavelet reads them by index. Upstream's mirrored sampler
 //   with its coordinate offsets is the JPEG 2000 whole-sample symmetric
 //   extension of the interleaved signal; `mirror()` below does it directly.
+// - As upstream's desktop default (PYROWAVE_PRECISION=1), the two finest
+//   levels and the output planes are stored in FP16, two samples of a row in
+//   a word (pack2x16float, which needs no `shader-f16`), the coarser levels in
+//   f32, and the arithmetic is f32 everywhere. `fp16: false` keeps it all in
+//   f32, for the bench's A/B.
 // - The inverse wavelet works on 32x32 tiles in workgroup memory, like
 //   upstream's, but in one dispatch per level for all components. Its
-//   default shader (IDWT2_WGSL) lifts in registers as upstream's does; the
+//   default shader (idwt2Wgsl) lifts in registers as upstream's does; the
 //   first port (IDWT_WGSL), which gives the same values twice as slowly on
 //   an AMD iGPU, stays for the bench's A/B.
 //
-// Output: the decoded planes in f32 (Y at the aligned size, Cb and Cr at half
-// of it, before the DC shift), then `pack` turns them into 8-bit 4:2:0 bytes
-// cropped to the picture, which is what the reference decoder writes.
+// Output: the decoded planes (Y at the aligned size, Cb and Cr at half of it,
+// before the DC shift), then `pack` turns them into 8-bit 4:2:0 bytes cropped
+// to the picture, which is what the reference decoder writes.
 //
 // The packet parser and the frame layout are in PyroWaveFrame.js, shared with
 // the WebGL2 fallback.
 
 import { LEVELS, NONE, PyroWaveFrame, alignUp } from './PyroWaveFrame.js';
 
+// The levels stored in FP16 when `fp16` (upstream's WaveletFP16Levels), and
+// the flag that marks their planes in the blocks' metadata.
+const FP16_LEVELS = 2;
+const F16_PLANE = 0x80000000;
+
+// An IEEE binary16 value from its bits.
+function halfToFloat(h) {
+    const e = (h >> 10) & 31;
+    const m = h & 1023;
+    let v;
+    if (e === 0) v = m * 2 ** -24;
+    else if (e === 31) v = m ? NaN : Infinity;
+    else v = (1024 + m) * 2 ** (e - 25);
+    return h & 0x8000 ? -v : v;
+}
+
 const DEQUANT_WGSL = /* wgsl */ `
+// plane: the word offset of the block's band in coef; its top bit set, an
+// FP16 plane.
 struct BlockMeta { plane: u32, width: u32, height: u32, xy: u32 }
 
 @group(0) @binding(0) var<storage, read> payload: array<u32>;
 @group(0) @binding(1) var<storage, read> offsets: array<u32>;
 @group(0) @binding(2) var<storage, read> metas: array<BlockMeta>;
-@group(0) @binding(3) var<storage, read_write> coef: array<f32>;
+@group(0) @binding(3) var<storage, read_write> coef: array<u32>;
 // x: the first block of the dispatch, in send order (a slice starts past the
 // blocks before it); order[] turns a send position into a block index.
 @group(0) @binding(4) var<uniform> range: vec4u;
@@ -170,12 +193,25 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
         }
     }
 
-    // Pixel order inside a 4x2 subblock: column-major, two rows.
-    for (var k = 0u; k < 8u; k++) {
-        let x = x0 + (k >> 1u);
-        let y = y0 + (k & 1u);
-        if (x < bm.width && y < bm.height) {
-            coef[bm.plane + y * bm.width + x] = v[k];
+    // Pixel order inside a 4x2 subblock: column-major, two rows. An FP16
+    // plane takes two columns a word; its sides are multiples of 8, so a
+    // subblock is all in or all out.
+    if ((bm.plane >> 31u) != 0u) {
+        if (x0 < bm.width && y0 < bm.height) {
+            let row = bm.width >> 1u;
+            let at = (bm.plane & 0x7fffffffu) + y0 * row + (x0 >> 1u);
+            coef[at] = pack2x16float(vec2f(v[0], v[2]));
+            coef[at + 1u] = pack2x16float(vec2f(v[4], v[6]));
+            coef[at + row] = pack2x16float(vec2f(v[1], v[3]));
+            coef[at + row + 1u] = pack2x16float(vec2f(v[5], v[7]));
+        }
+    } else {
+        for (var k = 0u; k < 8u; k++) {
+            let x = x0 + (k >> 1u);
+            let y = y0 + (k & 1u);
+            if (x < bm.width && y < bm.height) {
+                coef[bm.plane + y * bm.width + x] = bitcast<u32>(v[k]);
+            }
         }
     }
 }
@@ -313,10 +349,12 @@ function lift(v, n) {
 // two columns. Workgroup memory only holds the tile between the steps, three
 // barriers instead of nine. Entries of S pair two rows (a pair of rows i:
 // rows 2i and 2i + 1), then, after the row pass, two columns.
-const IDWT2_WGSL = /* wgsl */ `
+// in16 / out16: the level's bands / its output are FP16 planes, two columns
+// a word; else f32, a word each.
+const idwt2Wgsl = (in16, out16) => /* wgsl */ `
 struct Pass { w: u32, h: u32, comps: u32, y0: u32, bands: array<vec4u, 3>, outs: vec4u }
 @group(0) @binding(0) var<uniform> p: Pass;
-@group(0) @binding(1) var<storage, read_write> coef: array<f32>;
+@group(0) @binding(1) var<storage, read_write> coef: array<u32>;
 
 const ALPHA: f32 = -1.586134342059924;
 const BETA: f32 = -0.052980118572961;
@@ -334,6 +372,16 @@ fn mirror(i: i32, n: i32) -> i32 {
     if (j < 0) { j = -j; }
     if (j > n - 1) { j = 2 * (n - 1) - j; }
     return j;
+}
+
+// Sample (col, row) of the band at word offset b, p.w samples a row.
+fn ld(b: u32, row: u32, col: u32) -> f32 {
+${
+    in16
+        ? `    let two = unpack2x16float(coef[b + row * (p.w >> 1u) + (col >> 1u)]);
+    return select(two.x, two.y, (col & 1u) == 1u);`
+        : `    return bitcast<f32>(coef[b + row * p.w + col]);`
+}
 }
 
 @compute @workgroup_size(64)
@@ -355,11 +403,11 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
         let xOdd = (x & 1u) == 1u;
         let col = u32(mirror(ox + i32(x), i32(w2)) >> 1);
         let y = oy + i32(2u * pair);
-        let row0 = u32(mirror(y, i32(h2)) >> 1) * p.w;
-        let row1 = u32(mirror(y + 1, i32(h2)) >> 1) * p.w;
+        let row0 = u32(mirror(y, i32(h2)) >> 1);
+        let row1 = u32(mirror(y + 1, i32(h2)) >> 1);
         let sx = select(K, INV_K, xOdd);
-        let a = coef[select(bands.x, bands.y, xOdd) + row0 + col] * (sx * K);
-        let b = coef[select(bands.z, bands.w, xOdd) + row1 + col] * (sx * INV_K);
+        let a = ld(select(bands.x, bands.y, xOdd), row0, col) * (sx * K);
+        let b = ld(select(bands.z, bands.w, xOdd), row1, col) * (sx * INV_K);
         S[pair * PITCH + x] = vec2f(a, b);
     }
     workgroupBarrier();
@@ -400,57 +448,82 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
     let gx = wg.x * 32u + 2u * cp;
     let gy = ty * 32u + cy;
     if (gx < w2) {
-        ${lines(8, (j) => `if (gy + ${j}u < h2) { let o = dst + (gy + ${j}u) * w2 + gx; coef[o] = v${4 + j}.x; coef[o + 1u] = v${4 + j}.y; }`)}
+        ${lines(8, (j) =>
+            out16
+                ? `if (gy + ${j}u < h2) { coef[dst + (gy + ${j}u) * p.w + (gx >> 1u)] = pack2x16float(v${4 + j}); }`
+                : `if (gy + ${j}u < h2) { let o = dst + (gy + ${j}u) * w2 + gx; coef[o] = bitcast<u32>(v${4 + j}.x); coef[o + 1u] = bitcast<u32>(v${4 + j}.y); }`,
+        )}
     }
 }
 `;
 
-// f32 planes (before the DC shift) to 8-bit 4:2:0, cropped: one thread per
-// 4 bytes of a row, rows of Y, then Cb, then Cr (the width must be a
-// multiple of 8, so a chroma row is whole words).
-const PACK_WGSL = /* wgsl */ `
+// The output planes (before the DC shift) to 8-bit 4:2:0, cropped: one thread
+// per 4 bytes of a row, rows of Y, then Cb, then Cr (the width must be a
+// multiple of 8, so a chroma row is whole words). fp16: the planes are FP16.
+const packWgsl = (fp16) => /* wgsl */ `
 struct Pack { yOff: u32, cbOff: u32, crOff: u32, alignedW: u32, width: u32, height: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(0) var<uniform> p: Pack;
-@group(0) @binding(1) var<storage, read_write> planes: array<f32>;
+@group(0) @binding(1) var<storage, read_write> planes: array<u32>;
 @group(0) @binding(2) var<storage, read_write> outBytes: array<u32>;
 fn q(v: f32) -> u32 { return u32(round(clamp(v + 0.5, 0.0, 1.0) * 255.0)); }
+// Samples i .. i + 3 of the plane at word offset at (i a multiple of 4).
+fn four(at: u32, i: u32) -> vec4f {
+${
+    fp16
+        ? `    return vec4f(unpack2x16float(planes[at + (i >> 1u)]), unpack2x16float(planes[at + (i >> 1u) + 1u]));`
+        : `    return bitcast<vec4f>(vec4u(planes[at + i], planes[at + i + 1u], planes[at + i + 2u], planes[at + i + 3u]));`
+}
+}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3u) {
     let r = id.y;
     let ch = p.height / 2u;
+    var at: u32;
     var src: u32;
     var dst: u32;
     var words: u32;
     if (r < p.height) {
         words = p.width / 4u;
-        src = p.yOff + r * p.alignedW;
+        at = p.yOff;
+        src = r * p.alignedW;
         dst = r * words;
     } else if (r < p.height + ch) {
         words = p.width / 8u;
-        src = p.cbOff + (r - p.height) * (p.alignedW / 2u);
+        at = p.cbOff;
+        src = (r - p.height) * (p.alignedW / 2u);
         dst = p.width * p.height / 4u + (r - p.height) * words;
     } else if (r < p.height + 2u * ch) {
         words = p.width / 8u;
-        src = p.crOff + (r - p.height - ch) * (p.alignedW / 2u);
+        at = p.crOff;
+        src = (r - p.height - ch) * (p.alignedW / 2u);
         dst = p.width * p.height / 4u + ch * words + (r - p.height - ch) * words;
     } else {
         return;
     }
     let x = id.x;
     if (x >= words) { return; }
-    let s = src + 4u * x;
-    outBytes[dst + x] = q(planes[s]) | (q(planes[s + 1u]) << 8u) | (q(planes[s + 2u]) << 16u) |
-        (q(planes[s + 3u]) << 24u);
+    let s = four(at, src + 4u * x);
+    outBytes[dst + x] = q(s.x) | (q(s.y) << 8u) | (q(s.z) << 16u) | (q(s.w) << 24u);
 }
 `;
 
-// The decoded planes (f32, before the DC shift) drawn as RGB: a full-screen
+// The decoded planes (before the DC shift) drawn as RGB: a full-screen
 // triangle whose fragment reads Y at its pixel and Cb, Cr at half resolution
-// (nearest), BT.709, limited or full range.
-const PRESENT_WGSL = /* wgsl */ `
+// (nearest), BT.709, limited or full range. fp16: the planes are FP16.
+const presentWgsl = (fp16) => /* wgsl */ `
 struct Present { yOff: u32, cbOff: u32, crOff: u32, alignedW: u32, width: u32, height: u32, limited: u32, pad: u32 }
 @group(0) @binding(0) var<uniform> p: Present;
-@group(0) @binding(1) var<storage, read> planes: array<f32>;
+@group(0) @binding(1) var<storage, read> planes: array<u32>;
+
+// Sample i of the plane at word offset at.
+fn ld(at: u32, i: u32) -> f32 {
+${
+    fp16
+        ? `    let two = unpack2x16float(planes[at + (i >> 1u)]);
+    return select(two.x, two.y, (i & 1u) == 1u);`
+        : `    return bitcast<f32>(planes[at + i]);`
+}
+}
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -463,9 +536,9 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let x = min(u32(pos.x), p.width - 1u);
     let y = min(u32(pos.y), p.height - 1u);
     let c = (y >> 1u) * (p.alignedW >> 1u) + (x >> 1u);
-    var yv = clamp(planes[p.yOff + y * p.alignedW + x] + 0.5, 0.0, 1.0);
-    var cb = clamp(planes[p.cbOff + c] + 0.5, 0.0, 1.0) - 0.5;
-    var cr = clamp(planes[p.crOff + c] + 0.5, 0.0, 1.0) - 0.5;
+    var yv = clamp(ld(p.yOff, y * p.alignedW + x) + 0.5, 0.0, 1.0);
+    var cb = clamp(ld(p.cbOff, c) + 0.5, 0.0, 1.0) - 0.5;
+    var cr = clamp(ld(p.crOff, c) + 0.5, 0.0, 1.0) - 0.5;
     if (p.limited != 0u) {
         yv = (yv * 255.0 - 16.0) / 219.0;
         cb = cb * 255.0 / 224.0;
@@ -483,14 +556,54 @@ export class PyroWaveDecoder extends PyroWaveFrame {
      * @param {GPUDevice} device
      * @param {number} width picture width (even)
      * @param {number} height picture height (even)
-     * @param {{idwt?: number}} [options] idwt: the inverse wavelet's shader,
-     *        2 (IDWT2_WGSL) or 1 (IDWT_WGSL, the same values, slower)
+     * @param {{idwt?: number, fp16?: boolean}} [options] idwt: the inverse
+     *        wavelet's shader, 2 (idwt2Wgsl) or 1 (IDWT_WGSL, the same values,
+     *        slower, f32 only); fp16: the two finest levels and the output
+     *        planes stored in FP16 (shader 2), else everything in f32
      */
-    constructor(device, width, height, { idwt = 2 } = {}) {
+    constructor(device, width, height, { idwt = 2, fp16 = true } = {}) {
         super(width, height);
         this.device = device;
         this.idwtVersion = idwt === 1 ? 1 : 2;
+        this.fp16 = !!fp16 && this.idwtVersion === 2;
+        this._gpuLayout();
         this._resources();
+    }
+
+    // Where the planes sit in coefBuf, in 32-bit words, in the order of
+    // PyroWaveFrame's float offsets: an f32 sample a word, or, for the levels
+    // below FP16_LEVELS and the output planes when fp16, two FP16 samples of
+    // a row a word (every row there has a multiple of 8 samples).
+    _gpuLayout() {
+        const W = this.alignedW;
+        const H = this.alignedH;
+        const half = (level) => this.fp16 && level < FP16_LEVELS;
+        this.wordOf = {}; // "level,comp,band" -> word offset
+        const metaPlane = new Map(); // a float offset of planeOf -> its plane in the metadata
+        let words = 0;
+        for (let level = 0; level < LEVELS; level++) {
+            const samples = (W >> (level + 1)) * (H >> (level + 1));
+            for (let comp = 0; comp < 3; comp++) {
+                if (level === 0 && comp !== 0) continue;
+                for (let band = 0; band < 4; band++) {
+                    const key = `${level},${comp},${band}`;
+                    this.wordOf[key] = words;
+                    metaPlane.set(this.planeOf[key], words | (half(level) ? F16_PLANE : 0));
+                    words += half(level) ? samples / 2 : samples;
+                }
+            }
+        }
+        const perWord = this.fp16 ? 2 : 1;
+        this.yWord = words;
+        words += (W * H) / perWord;
+        this.cbWord = words;
+        words += (W * H) / 4 / perWord;
+        this.crWord = words;
+        words += (W * H) / 4 / perWord;
+        this.coefWords = words;
+        this.gpuMetas = this.metas.slice();
+        for (let i = 0; i < this.blockCount; i++)
+            this.gpuMetas[4 * i] = metaPlane.get(this.metas[4 * i]);
     }
 
     _resources() {
@@ -499,14 +612,14 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         const C = GPUBufferUsage.COPY_DST;
         this.payloadBuf = d.createBuffer({ size: this.payloadCpu.byteLength + 16, usage: S | C });
         this.offsetsBuf = d.createBuffer({ size: this.offsetsCpu.byteLength, usage: S | C });
-        this.metaBuf = d.createBuffer({ size: this.metas.byteLength, usage: S | C });
-        d.queue.writeBuffer(this.metaBuf, 0, this.metas);
+        this.metaBuf = d.createBuffer({ size: this.gpuMetas.byteLength, usage: S | C });
+        d.queue.writeBuffer(this.metaBuf, 0, this.gpuMetas);
         this.orderBuf = d.createBuffer({ size: this.sendOrder.byteLength, usage: S | C });
         d.queue.writeBuffer(this.orderBuf, 0, this.sendOrder);
         this.rangeBuf = d.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | C });
         this._rangeFirst = 0;
         this.coefBuf = d.createBuffer({
-            size: this.coefFloats * 4,
+            size: this.coefWords * 4,
             usage: S | GPUBufferUsage.COPY_SRC,
         });
         const packedBytes = (this.width * this.height * 3) / 2;
@@ -520,16 +633,33 @@ export class PyroWaveDecoder extends PyroWaveFrame {
             layout: 'auto',
             compute: { module: mod(DEQUANT_WGSL), entryPoint: 'main' },
         });
-        this.idwtPipe = d.createComputePipeline({
-            layout: 'auto',
-            compute: {
-                module: mod(this.idwtVersion === 2 ? IDWT2_WGSL : IDWT_WGSL),
-                entryPoint: 'main',
-            },
+        // The levels' pipelines differ by the storage of their bands and
+        // output, all on one layout so that one bind group per level fits any.
+        const idwtLayout = d.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+            ],
         });
+        const pipeLayout = d.createPipelineLayout({ bindGroupLayouts: [idwtLayout] });
+        const idwtPipes = new Map();
+        const idwtPipe = (in16, out16) => {
+            const key = this.idwtVersion === 1 ? 'v1' : `${in16},${out16}`;
+            if (!idwtPipes.has(key)) {
+                const code = this.idwtVersion === 1 ? IDWT_WGSL : idwt2Wgsl(in16, out16);
+                idwtPipes.set(
+                    key,
+                    d.createComputePipeline({
+                        layout: pipeLayout,
+                        compute: { module: mod(code), entryPoint: 'main' },
+                    }),
+                );
+            }
+            return idwtPipes.get(key);
+        };
         this.packPipe = d.createComputePipeline({
             layout: 'auto',
-            compute: { module: mod(PACK_WGSL), entryPoint: 'main' },
+            compute: { module: mod(packWgsl(this.fp16)), entryPoint: 'main' },
         });
         this._bindDequant();
 
@@ -538,6 +668,7 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         // go in one dispatch (z): WebGPU puts a barrier between dispatches that
         // write the same buffer, and on the AMD iGPU thirteen of them cost
         // more than the transform itself (4 ms against 0.7 in Vulkan).
+        const half = (level) => this.fp16 && level < FP16_LEVELS;
         this.passes = [];
         for (let level = LEVELS - 1; level >= 0; level--) {
             const w = this.alignedW >> (level + 1);
@@ -551,10 +682,11 @@ export class PyroWaveDecoder extends PyroWaveFrame {
                     outs.push(0);
                     continue;
                 }
-                for (let b = 0; b < 4; b++) bands.push(this.planeOf[`${level},${comp},${b}`]);
-                if (level === 0) outs.push(this.outY);
-                else if (level === 1 && comp !== 0) outs.push(comp === 1 ? this.outCb : this.outCr);
-                else outs.push(this.planeOf[`${level - 1},${comp},0`]);
+                for (let b = 0; b < 4; b++) bands.push(this.wordOf[`${level},${comp},${b}`]);
+                if (level === 0) outs.push(this.yWord);
+                else if (level === 1 && comp !== 0)
+                    outs.push(comp === 1 ? this.cbWord : this.crWord);
+                else outs.push(this.wordOf[`${level - 1},${comp},0`]);
             }
             // The level's bands are whole once the blocks before the next
             // (finer) level's are: they come in that order.
@@ -565,6 +697,9 @@ export class PyroWaveDecoder extends PyroWaveFrame {
                 comps,
                 end,
                 tileRows: Math.ceil((2 * h) / 32),
+                // Its output: a band of the finer level, or an output plane
+                // (FP16 as the finest level's bands).
+                pipe: idwtPipe(half(level), half(level - 1)),
                 u: [w, h, comps, 0, ...bands, ...outs, 0],
             });
         }
@@ -579,14 +714,14 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         this.passes.forEach((pass, k) => u.set(pass.u, (slot / 4) * k));
         const packSlot = this.passes.length;
         u.set(
-            [this.outY, this.outCb, this.outCr, this.alignedW, this.width, this.height, 0, 0],
+            [this.yWord, this.cbWord, this.crWord, this.alignedW, this.width, this.height, 0, 0],
             (slot / 4) * packSlot,
         );
         d.queue.writeBuffer(this.uniformBuf, 0, u);
         const ubo = (k, size) => ({ buffer: this.uniformBuf, offset: slot * k, size });
         for (const [k, pass] of this.passes.entries()) {
             pass.bind = d.createBindGroup({
-                layout: this.idwtPipe.getBindGroupLayout(0),
+                layout: idwtLayout,
                 entries: [
                     { binding: 0, resource: ubo(k, 80) },
                     { binding: 1, resource: { buffer: this.coefBuf } },
@@ -713,7 +848,6 @@ export class PyroWaveDecoder extends PyroWaveFrame {
             this._dequantDone = end;
         }
         if (levels > this._levelsDone || rows > this._tileRowsDone) {
-            pass.setPipeline(this.idwtPipe);
             for (let k = this._levelsDone; k < levels; k++) this._idwt(pass, this.passes[k]);
             this._levelsDone = levels;
             if (rows > this._tileRowsDone) {
@@ -728,6 +862,7 @@ export class PyroWaveDecoder extends PyroWaveFrame {
     }
 
     _idwt(pass, p, rows = p.tileRows) {
+        pass.setPipeline(p.pipe);
         pass.setBindGroup(0, p.bind);
         pass.dispatchWorkgroups(Math.ceil((2 * p.w) / 32), rows, p.comps);
     }
@@ -752,7 +887,6 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         }
         if (run('idwt')) {
             this._setFineY0(0);
-            pass.setPipeline(this.idwtPipe);
             for (const p of this.passes) this._idwt(pass, p);
         }
         if (run('pack')) this._pack(pass);
@@ -794,7 +928,6 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         this._setFineY0(0);
         this.passes.forEach((p, k) => {
             pass = begin(`idwt${LEVELS - 1 - k}`);
-            pass.setPipeline(this.idwtPipe);
             this._idwt(pass, p);
             pass.end();
         });
@@ -815,7 +948,7 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         const format =
             context.getConfiguration?.()?.format || navigator.gpu.getPreferredCanvasFormat();
         if (!this._presentPipe || this._presentFormat !== format) {
-            const module = d.createShaderModule({ code: PRESENT_WGSL });
+            const module = d.createShaderModule({ code: presentWgsl(this.fp16) });
             this._presentPipe = d.createRenderPipeline({
                 layout: 'auto',
                 vertex: { module, entryPoint: 'vs' },
@@ -841,9 +974,9 @@ export class PyroWaveDecoder extends PyroWaveFrame {
                 this._presentUbo,
                 0,
                 new Uint32Array([
-                    this.outY,
-                    this.outCb,
-                    this.outCr,
+                    this.yWord,
+                    this.cbWord,
+                    this.crWord,
                     this.alignedW,
                     this.width,
                     this.height,
@@ -868,6 +1001,20 @@ export class PyroWaveDecoder extends PyroWaveFrame {
         pass.setBindGroup(0, this._presentBind);
         pass.draw(3);
         pass.end();
+    }
+
+    /** The output planes (Y, Cb, Cr) in coefBuf, in bytes: for the lab's read-back. */
+    planesRange() {
+        return { offset: this.yWord * 4, size: (this.coefWords - this.yWord) * 4 };
+    }
+
+    /** A read-back of planesRange() as f32 samples, before the DC shift. */
+    planesF32(buffer) {
+        if (!this.fp16) return new Float32Array(buffer);
+        const halves = new Uint16Array(buffer);
+        const out = new Float32Array(halves.length);
+        for (let i = 0; i < halves.length; i++) out[i] = halfToFloat(halves[i]);
+        return out;
     }
 
     destroy() {

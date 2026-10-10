@@ -15,9 +15,11 @@
       // clip, then times the GPU decode of one frame `timing` times. The result is
       // left in window.__labResult. &api=webgl2 runs the WebGL2 fallback instead.
       // WebGPU only: &idwt=1 the first inverse wavelet shader (2, the
-      // default, gives the same values faster), &cmp=1 the planes against
-      // the first shader's, &split=1 each stage timed alone, &bw=1 the GPU's
-      // memory bandwidth.
+      // default, gives the same values faster), &fp16=0 every plane in f32
+      // (the default keeps the two finest levels in FP16), &cmp=1 the planes
+      // and the 8-bit frame against the first shader's in f32, &split=1 each
+      // stage timed alone, &bw=1 the GPU's memory bandwidth, &present=1 the
+      // product's presentation checked once, then timed.
       import { PyroWaveDecoder } from "/frontend/js/stream/ultra/PyroWaveDecoder.js";
 
       const q = new URLSearchParams(location.search);
@@ -26,22 +28,31 @@
       const ref = q.get("ref") || "0x10de";
       const maxFrames = Number(q.get("frames") || 60);
       const timing = Number(q.get("timing") || 200);
-      // One stage alone in the timed loop: dequant, idwt or pack.
-      const stages = q.get("stages") || undefined;
+      // Some stages alone in the timed loop: dequant, idwt or pack, or
+      // several joined by "+" (dequant+idwt: the player's decode pass; an
+      // unescaped "+" comes as a space).
+      const stagesArg = (q.get("stages") || "").trim();
+      const stages = /[\s+]/.test(stagesArg)
+        ? stagesArg.split(/[\s+]+/)
+        : stagesArg || undefined;
       // Untimed decodes in the same submission before the timed one, so an
       // idle GPU has its clocks up: a frame stream keeps it busy too.
       const warm = Number(q.get("warm") || 0);
       // By slices (WebGPU): each frame fed in this many pieces cut anywhere,
       // one submission each, as UltraPlayer does on the audio road; the timed
-      // loop then times what the last piece leaves.
+      // loop then times what the last piece leaves, and every piece's pass
+      // (their sum: the decode by slices, against a whole frame's).
       const slices = Number(q.get("slices") || 0);
       // The inverse wavelet's shader (PyroWaveDecoder's idwt option).
       const idwt = Number(q.get("idwt") || 2);
+      // The two finest levels in FP16 (PyroWaveDecoder's fp16 option).
+      const fp16 = q.get("fp16") !== "0";
       // The timed loop with each stage in a pass of its own, each timed:
       // dequant, every level of the inverse wavelet, pack.
       const split = q.get("split") === "1";
-      // Each frame's f32 planes against shader 1's, the same frame decoded
-      // whole: the largest difference (the shaders do the same arithmetic).
+      // Each frame's planes (as f32) and 8-bit frame against those of
+      // shader 1 in f32, the same frame decoded whole: the largest
+      // differences (the shaders do the same arithmetic, FP16 rounds).
       const cmp = q.get("cmp") === "1";
       // The GPU's memory bandwidth, copying then writing 64 MiB.
       const bw = q.get("bw") === "1";
@@ -145,26 +156,28 @@
           frames.push(packets);
         }
 
-        const dec = new PyroWaveDecoder(device, w, h, { idwt });
+        const dec = new PyroWaveDecoder(device, w, h, { idwt, fp16 });
         const packedSize = (w * h * 3) / 2;
         const readback = device.createBuffer({
           size: dec.packedBuf.size,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
-        // The planes (Y, Cb, Cr in f32) of both decoders, read back.
+        // The planes (Y, Cb, Cr) of both decoders and the reference's 8-bit
+        // frame, read back.
         const ref1 = cmp
-          ? new PyroWaveDecoder(device, w, h, { idwt: 1 })
+          ? new PyroWaveDecoder(device, w, h, { idwt: 1, fp16: false })
           : null;
-        const planeBytes = (dec.coefFloats - dec.outY) * 4;
-        const planeRead = ref1
-          ? [0, 1].map(() =>
-              device.createBuffer({
-                size: planeBytes,
-                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-              }),
-            )
-          : null;
+        const ranges = ref1 ? [dec.planesRange(), ref1.planesRange()] : null;
+        const mapped = (size) =>
+          device.createBuffer({
+            size,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          });
+        const planeRead = ref1 ? ranges.map((r) => mapped(r.size)) : null;
+        const ref1Read = ref1 ? mapped(ref1.packedBuf.size) : null;
         let planeDiff = 0;
+        let codeDiff = 0;
+        let codesOff = 0;
 
         // A frame's blocks back to back in our host's send order (the
         // reference encoder's corpus comes in index order), cut in `n`
@@ -183,8 +196,10 @@
         };
         // Feeds pieces as UltraPlayer does (the cut tail of a block kept for
         // the next piece), submitting each but the last, which is recorded
-        // into `last` (and timed by `tw`).
-        const bySlices = (cuts, last, tw) => {
+        // into `last` (and timed by `tw`). stamp(k), when given, times piece
+        // k's pass instead (the last one's too); `passed` gets the pieces
+        // that had a pass.
+        const bySlices = (cuts, last, tw, stamp, passed) => {
           dec.clear();
           dec.startSlices();
           let carry = null;
@@ -201,11 +216,15 @@
             carry = used < data.length ? data.slice(used) : null;
             if (k < cuts.length - 1) {
               const enc = device.createCommandEncoder();
-              if (dec.decodeSlice(enc)) device.queue.submit([enc.finish()]);
+              if (dec.decodeSlice(enc, false, stamp?.(k))) {
+                device.queue.submit([enc.finish()]);
+                passed?.push(k);
+              }
             } else {
               if (carry) throw new Error("the last piece ends inside a block");
               ready = dec.isReady();
-              dec.decodeSlice(last, true, tw);
+              dec.decodeSlice(last, true, stamp ? stamp(k) : tw);
+              passed?.push(k);
             }
           }
           return ready;
@@ -236,20 +255,22 @@
           if (ref1) {
             ref1.clear();
             for (const p of frames[f]) ref1.pushPacket(p);
-            ref1.decode(enc, undefined, ["dequant", "idwt"]);
-            enc.copyBufferToBuffer(
-              dec.coefBuf,
-              dec.outY * 4,
-              planeRead[0],
-              0,
-              planeBytes,
+            ref1.decode(enc);
+            [dec, ref1].forEach((x, k) =>
+              enc.copyBufferToBuffer(
+                x.coefBuf,
+                ranges[k].offset,
+                planeRead[k],
+                0,
+                ranges[k].size,
+              ),
             );
             enc.copyBufferToBuffer(
-              ref1.coefBuf,
-              ref1.outY * 4,
-              planeRead[1],
+              ref1.packedBuf,
               0,
-              planeBytes,
+              ref1Read,
+              0,
+              ref1.packedBuf.size,
             );
           }
           device.queue.submit([enc.finish()]);
@@ -260,16 +281,23 @@
           );
           readback.unmap();
           if (ref1) {
-            await Promise.all(
-              planeRead.map((b) => b.mapAsync(GPUMapMode.READ)),
-            );
-            const a = new Float32Array(planeRead[0].getMappedRange());
-            const b = new Float32Array(planeRead[1].getMappedRange());
+            const reads = [...planeRead, ref1Read];
+            await Promise.all(reads.map((b) => b.mapAsync(GPUMapMode.READ)));
+            const a = dec.planesF32(planeRead[0].getMappedRange());
+            const b = ref1.planesF32(planeRead[1].getMappedRange());
             for (let i = 0; i < a.length; i++) {
               const d = Math.abs(a[i] - b[i]);
               if (d > planeDiff) planeDiff = d;
             }
-            planeRead.forEach((x) => x.unmap());
+            const r8 = new Uint8Array(ref1Read.getMappedRange(), 0, packedSize);
+            for (let i = 0; i < packedSize; i++) {
+              const d = Math.abs(got[i] - r8[i]);
+              if (d) {
+                codesOff++;
+                if (d > codeDiff) codeDiff = d;
+              }
+            }
+            reads.forEach((x) => x.unmap());
           }
           const vsOracle = compare(got, oracle[f], w * h);
           const vsSource = compare(got, source[f], w * h);
@@ -290,6 +318,7 @@
         // on a Canvas2D, against the same conversion done here on the oracle's
         // decode of that frame (BT.709 limited).
         let presentMaxDiff = null;
+        let presentGpuMs = null;
         if (q.get("present") === "1") {
           const off = new OffscreenCanvas(w, h);
           const gctx = off.getContext("webgpu");
@@ -330,6 +359,38 @@
           }
           presentMaxDiff = maxDiff;
           log(`present: max RGB diff ${maxDiff} (sampled 1 px in 49)`);
+
+          // Its GPU time, the same frame drawn again and again.
+          if (hasTs && timing > 0) {
+            const qs = device.createQuerySet({ type: "timestamp", count: 2 });
+            const resolve = device.createBuffer({
+              size: 16,
+              usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+            });
+            const tsRead = device.createBuffer({
+              size: 16,
+              usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+            const ms = [];
+            for (let i = 0; i < timing; i++) {
+              const enc = device.createCommandEncoder();
+              dec.present(enc, gctx, true, {
+                querySet: qs,
+                beginningOfPassWriteIndex: 0,
+                endOfPassWriteIndex: 1,
+              });
+              enc.resolveQuerySet(qs, 0, 2, resolve, 0);
+              enc.copyBufferToBuffer(resolve, 0, tsRead, 0, 16);
+              device.queue.submit([enc.finish()]);
+              await tsRead.mapAsync(GPUMapMode.READ);
+              const t = new BigUint64Array(tsRead.getMappedRange());
+              const x = Number(BigInt.asIntN(64, t[1] - t[0])) / 1e6;
+              if (x > 0 && x < 1000) ms.push(x);
+              tsRead.unmap();
+            }
+            if (ms.length)
+              presentGpuMs = { p50: pct(ms, 0.5), p99: pct(ms, 0.99) };
+          }
         }
 
         // GPU time of each stage alone, the same frame again and again.
@@ -466,21 +527,31 @@
           );
         }
 
-        // GPU time of the decode, the same frame again and again.
+        // GPU time of the decode, the same frame again and again. By slices:
+        // what the last piece leaves, and every piece's pass (a pair each):
+        // their sum, and the span from the first one's start to the end.
         let gpuMs = [];
+        const piecesSum = [];
+        const piecesSpan = [];
         let badTimestamps = 0;
         if (hasTs && timing > 0 && !split) {
-          const qs = device.createQuerySet({ type: "timestamp", count: 2 });
+          const n = slices > 0 ? 2 * slices : 2;
+          const qs = device.createQuerySet({ type: "timestamp", count: n });
           const resolve = device.createBuffer({
-            size: 16,
+            size: n * 8,
             usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
           });
           const tsRead = device.createBuffer({
-            size: 16,
+            size: n * 8,
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
           });
           const lastCuts =
             slices > 0 ? pieces(frames[frames.length - 1], slices) : null;
+          const stamp = (k) => ({
+            querySet: qs,
+            beginningOfPassWriteIndex: 2 * k,
+            endOfPassWriteIndex: 2 * k + 1,
+          });
           for (let i = 0; i < timing; i++) {
             dec.decodedThisSeq = false;
             const enc = device.createCommandEncoder();
@@ -490,37 +561,55 @@
               dec.decode(enc, undefined, stages);
               dec.decodedThisSeq = false;
             }
-            const tw = {
-              querySet: qs,
-              beginningOfPassWriteIndex: 0,
-              endOfPassWriteIndex: 1,
-            };
-            if (lastCuts) bySlices(lastCuts, enc, tw);
-            else dec.decode(enc, tw, stages);
-            enc.resolveQuerySet(qs, 0, 2, resolve, 0);
-            enc.copyBufferToBuffer(resolve, 0, tsRead, 0, 16);
+            const passed = [];
+            if (lastCuts) bySlices(lastCuts, enc, undefined, stamp, passed);
+            else dec.decode(enc, stamp(0), stages);
+            enc.resolveQuerySet(qs, 0, n, resolve, 0);
+            enc.copyBufferToBuffer(resolve, 0, tsRead, 0, n * 8);
             device.queue.submit([enc.finish()]);
             await tsRead.mapAsync(GPUMapMode.READ);
             const t = new BigUint64Array(tsRead.getMappedRange());
+            const span = (a, b) => Number(BigInt.asIntN(64, t[b] - t[a])) / 1e6;
             // The Arc sometimes returns an end before its start (a wrapped
-            // value): such a pair is dropped and counted.
-            const ms = Number(BigInt.asIntN(64, t[1] - t[0])) / 1e6;
-            if (ms > 0 && ms < 1000) gpuMs.push(ms);
-            else badTimestamps++;
+            // value): such a run is dropped and counted.
+            const ok = (x) => x > 0 && x < 1000;
+            if (lastCuts) {
+              const each = passed.map((k) => span(2 * k, 2 * k + 1));
+              const last = slices - 1;
+              const whole = span(2 * passed[0], 2 * last + 1);
+              if (each.every(ok) && ok(whole)) {
+                gpuMs.push(each[each.length - 1]);
+                piecesSum.push(each.reduce((a, b) => a + b, 0));
+                piecesSpan.push(whole);
+              } else badTimestamps++;
+            } else {
+              const x = span(0, 1);
+              if (ok(x)) gpuMs.push(x);
+              else badTimestamps++;
+            }
             tsRead.unmap();
           }
         }
+        const q50 = (xs) =>
+          xs.length ? { p50: pct(xs, 0.5), p99: pct(xs, 0.99) } : null;
 
         const res = {
           clip,
           mbps,
           ref,
-          stages: stages || "all",
+          stages: stagesArg || "all",
           warm,
           slices,
+          piecesSumMs: q50(piecesSum),
+          piecesSpanMs: q50(piecesSpan),
           idwt,
+          fp16: dec.fp16,
           split: splitMs,
           planeDiff: ref1 ? planeDiff : null,
+          codeDiff: ref1 ? codeDiff : null,
+          codesOffPct: ref1
+            ? (100 * codesOff) / (packedSize * perFrame.length)
+            : null,
           bandwidth,
           width: w,
           height: h,
@@ -543,6 +632,7 @@
             : null,
           errors,
           presentMaxDiff,
+          presentGpuMs,
           perFrame,
         };
         log(JSON.stringify({ ...res, perFrame: undefined }));

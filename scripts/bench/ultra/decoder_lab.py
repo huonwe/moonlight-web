@@ -58,10 +58,12 @@ def main():
     ap.add_argument("--frames", type=int, default=60)
     ap.add_argument("--timing", type=int, default=200)
     ap.add_argument("--warm", type=int, default=0, help="untimed decodes before each timed one")
-    ap.add_argument("--stages", default="", help="time one stage alone: dequant, idwt or pack")
+    ap.add_argument("--stages", default="",
+                    help="time some stages alone: dequant, idwt or pack, or joined by + (dequant+idwt: the "
+                         "player's decode pass)")
     ap.add_argument("--slices", type=int, default=0,
                     help="feed each frame in this many pieces (WebGPU): checked as decoded, and the timed loop "
-                         "times what the last piece leaves")
+                         "times what the last piece leaves and every piece's pass")
     ap.add_argument("--chrome-arg", action="append", default=[])
     ap.add_argument("--show", action="store_true", help="print each frame's line")
     ap.add_argument("--present", action="store_true", help="check the product's presentation path once")
@@ -69,6 +71,8 @@ def main():
     ap.add_argument("--api", default="webgpu", help="webgpu, or webgl2 for the fallback decoder")
     ap.add_argument("--idwt", type=int, default=2,
                     help="the inverse wavelet's shader (WebGPU): 2, or 1 for the first, slower one")
+    ap.add_argument("--fp16", type=int, default=1,
+                    help="the two finest levels in FP16 (WebGPU, shader 2): 1, or 0 for every plane in f32")
     ap.add_argument("--split", action="store_true",
                     help="time each stage alone, in a pass of its own: dequant, each level of the inverse wavelet, pack")
     ap.add_argument("--cmp", action="store_true", help="each frame's f32 planes against shader 1's")
@@ -118,9 +122,9 @@ def main():
             for mbps in a.mbps.split(","):
                 url = ("http://127.0.0.1:%d/scripts/bench/ultra/decoder-lab.html?clip=%s&mbps=%s&ref=%s"
                        "&frames=%d&timing=%d&stages=%s&warm=%d&power=%s&present=%d&api=%s&slices=%d"
-                       "&idwt=%d&split=%d&cmp=%d&bw=%d"
+                       "&idwt=%d&fp16=%d&split=%d&cmp=%d&bw=%d"
                        % (http_port, clip, mbps, a.ref, a.frames, a.timing, a.stages, a.warm, a.power,
-                          1 if a.present else 0, a.api, a.slices, a.idwt, 1 if a.split else 0,
+                          1 if a.present else 0, a.api, a.slices, a.idwt, a.fp16, 1 if a.split else 0,
                           1 if a.cmp else 0, 1 if a.bw else 0))
                 call("Page.navigate", url=url)
                 # A slow client (a TV) takes seconds to load the module that sets it.
@@ -142,24 +146,38 @@ def main():
                     for f in res["perFrame"]:
                         print("  ", f)
                 g = res.get("gpuMs") or {}
-                print("%-15s %4s Mbit/s %-7s %s  max diff Y %d C %d vs oracle (min PSNR %.1f dB), PSNR-Y vs "
+                label = res.get("stages", "") + (" /%d" % res["slices"] if res.get("slices") else "")
+                if res.get("fp16") is not None:
+                    label += " fp16" if res["fp16"] else " f32"
+                print("%-15s %4s Mbit/s %-12s %s  max diff Y %d C %d vs oracle (min PSNR %.1f dB), PSNR-Y vs "
                       "source %.2f dB, ready %s, GPU decode p50 %s ms p99 %s ms%s"
-                      % (clip, mbps, res.get("stages", "") + (" /%d" % res["slices"] if res.get("slices") else ""),
+                      % (clip, mbps, label,
                          res["adapter"], res["maxDiff"], res["maxDiffC"], res["minPsnrVsOracle"],
                          res["meanPsnrVsSource"], res["allReady"],
                          "%.3f" % g["p50"] if g else "-", "%.3f" % g["p99"] if g else "-",
                          " ERRORS %s" % res["errors"] if res["errors"] else ""))
+                if res.get("piecesSumMs"):
+                    print("    by slices, every piece's pass summed: p50 %.3f ms p99 %.3f ms; first start to last end "
+                          "p50 %.3f ms" % (res["piecesSumMs"]["p50"], res["piecesSumMs"]["p99"],
+                                           res["piecesSpanMs"]["p50"]))
                 if res.get("wallMs"):
                     print("    wall clock, decode + present + 1-pixel read-back: p50 %.2f ms p99 %.2f ms"
                           % (res["wallMs"]["p50"], res["wallMs"]["p99"]))
                 if res.get("presentMaxDiff") is not None:
-                    print("    present path: max RGB diff %d against the oracle's frame" % res["presentMaxDiff"])
+                    pg = res.get("presentGpuMs")
+                    print("    present path: max RGB diff %d against the oracle's frame%s"
+                          % (res["presentMaxDiff"],
+                             ", GPU p50 %.3f ms p99 %.3f ms" % (pg["p50"], pg["p99"]) if pg else ""))
                 if res.get("planeDiff") is not None:
-                    print("    idwt %d against idwt 1: max f32 plane difference %.3g" % (res["idwt"], res["planeDiff"]))
+                    print("    idwt %d%s against idwt 1 in f32: max plane difference %.3g; 8-bit frame: max %d, "
+                          "%.3f %% of samples differ"
+                          % (res["idwt"], " fp16" if res.get("fp16") else "", res["planeDiff"], res["codeDiff"],
+                             res["codesOffPct"]))
                 if res.get("split"):
                     sp = res["split"]
-                    print("    idwt %d, each stage alone, p50 (p99) ms: %s" % (res["idwt"], ", ".join(
-                        "%s %.3f (%.3f)" % (s, v["p50"], v["p99"]) for s, v in sp.items() if v)))
+                    print("    idwt %d%s, each stage alone, p50 (p99) ms: %s" % (
+                        res["idwt"], " fp16" if res.get("fp16") else " f32", ", ".join(
+                            "%s %.3f (%.3f)" % (s, v["p50"], v["p99"]) for s, v in sp.items() if v)))
                     levels = [v["p50"] for s, v in sp.items() if s.startswith("idwt") and v]
                     if levels:
                         print("    the levels summed: %.3f ms" % sum(levels))
