@@ -2543,6 +2543,123 @@ GPU, et l'image reste à 1 code de l'oracle. Les leviers suivants :
 - **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
   de Bruno.
 
+### 6.34 Le FP16 sur le câble : −0,5 ms en images entières, rien par tranches (10/10/2026, 06:09-06:53)
+
+Le banc du §6.32, avec le stockage pour seul facteur (`mw_ultra_fp16=0` /
+`1`) :
+- l'UM790Pro sous Windows en client ;
+- la `--dev` de DualRTX sur l'écran virtuel du produit à 240 Hz, rendu par la
+  RTX ;
+- 120 i/s, relance allumée, nouveau shader d'iDWT ;
+- PyroWave sur la route audio.
+
+`build\` date de 02:27 (`e2e46af4`) : depuis, seuls le JS du lecteur et la doc
+ont changé, et le JS est servi en direct. Accord de Bruno pour l'écran
+virtuel ; banc donné par 59.
+
+Cinq bras, en 19 passes de 60 clics (`scratchpad/pw120c/run-fp16.sh`) :
+- `h10` : le HEVC du produit par SCTP, au début, au milieu et à la fin ;
+- `kf` / `kh` : PyroWave par tranches de 16 Kio, f32 / FP16 ;
+- `wf` / `wh` : PyroWave en images entières, f32 / FP16.
+
+Chaque mode a deux ABBA, le second en BAAB. Les 16 passes PyroWave ont pris le
+stockage demandé, comme l'indique le résumé du lecteur. Aucun TDR (événement
+4101) sur les deux PC.
+
+Du relais au dessin (en ms : moyenne des médianes de chaque passe ; entre
+crochets, la plus basse et la plus haute) :
+
+| Bras | relais → arrivée | relais → dessin, p50 | moyenne | p90 |
+|---|---|---|---|---|
+| HEVC (SCTP) | 0,88 | 1,54 [1,52-1,56] | 1,71 | 2,10 |
+| tranches, f32 | 3,33 | 6,01 [5,66-6,33] | 6,84 | 9,33 |
+| tranches, FP16 | 3,21 | 6,02 [5,88-6,24] | 6,64 | 8,79 |
+| entières, f32 | 3,04 | 6,41 [6,15-6,71] | 7,07 | 9,16 |
+| entières, FP16 | 2,98 | 5,92 [5,68-6,22] | 6,53 | 8,28 |
+
+Le décodage sur le GPU de la 780M (horloge du GPU, médianes en ms ; « puis »
+sépare le premier ABBA du second) :
+
+| Étape | f32 | FP16 |
+|---|---|---|
+| image entière : passe de décodage | 1,07 | 0,88 |
+| image entière : passe d'affichage | 0,31 | 0,24 |
+| image entière : du début du GPU à sa fin | 1,52 | 1,25 |
+| image entière : soumission → fin (horloge de la page), p50 / p90 | 2,5-3,0 / 3,5-4,0 | 2,3 / 2,9-3,4 |
+| tranches : le morceau lourd, 7e sur 10 | 0,79 | 0,65 |
+| tranches : les morceaux et la passe finale, par image | 1,285 | 1,067 |
+| tranches : dernière soumission → fin du dernier morceau | 1,05-1,10 puis 0,93-0,95 | 0,61-0,68 puis 1,34-1,50 |
+| dont le GPU inactif, à attendre un morceau | 0,21-0,23 puis 0,15-0,16 | 0,14-0,15 puis 0,38-0,52 |
+
+Les clics (`report.py`, en ms ; 180 clics pour le HEVC, 240 par bras
+PyroWave) :
+
+| Bras | Clic p50 | Moyenne | p90 | Capture → dessin hors des clics, moyenne |
+|---|---|---|---|---|
+| HEVC (SCTP) | 11,2 | 10,6 | 13,5 | 3,5 |
+| tranches, f32 | 15,3 | 16,3 | 22,0 | 8,6 |
+| tranches, FP16 | 15,1 | 15,9 | 21,4 | 8,4 |
+| entières, f32 | 15,1 | 15,8 | 22,0 | 8,7 |
+| entières, FP16 | 14,8 | 15,4 | 20,3 | 8,2 |
+
+Ce que la série dit :
+- **Le GPU fait au câble ce qu'il faisait au labo.** La passe de décodage
+  tombe de 1,07 à 0,88 ms (labo : 1,068 → 0,894), l'affichage de 0,31 à 0,24.
+  Par tranches, les morceaux et la passe finale passent de 1,285 à 1,067 ms
+  (labo, 11 morceaux : 1,286 → 1,069). Le surcoût du découpage reste à +0,21
+  et +0,18 ms.
+- **En images entières, l'image gagne plus que le GPU.** Du relais au dessin :
+  −0,49 ms en médiane, −0,54 en moyenne, −0,88 au p90, pour 0,27 ms de GPU.
+  - Comme au §6.32, la queue de l'attente raccourcit aussi : soumission → fin
+    −0,4 ms en médiane, −0,6 au p90.
+  - La relance tourne moins : 8,5 commandes vides par attente au lieu de 9,9.
+  - Le FP16 gagne dans les deux ABBA. Les bras se touchent pourtant : la
+    passe FP16 la plus lente (6,22) est derrière la passe f32 la plus rapide
+    (6,15).
+- **Par tranches, la médiane ne bouge pas** (6,01 contre 6,02). La moyenne
+  gagne 0,2 ms, le p90 0,55.
+  - Le signe s'inverse d'un ABBA à l'autre : dans chacun, la paire du milieu
+    gagne.
+  - Le GPU gagne pourtant 0,22 ms par image, dont 0,14 sur le morceau lourd.
+  - Au second ABBA, les deux passes FP16 ont attendu 1,3-1,5 ms entre la
+    dernière soumission et la fin du dernier morceau, au lieu de 0,6-0,7 au
+    premier. Leur GPU y restait inactif 0,4-0,5 ms, à attendre un morceau que
+    Chrome n'avait pas encore apporté. Leur travail sur le GPU, lui, n'a pas
+    bougé. Les passes f32 du même ABBA n'ont pas eu ce retard.
+  - Je n'en ai pas trouvé la cause. Elle tient à la façon dont Chrome apporte
+    les morceaux au GPU (§6.25), pas au GPU. Au second ABBA, les octets d'une
+    image arrivaient aussi plus serrés : le dernier morceau 1,6 ms après le
+    premier, au lieu de 1,9-2,0.
+- **Les tranches ne gagnent plus rien.** En FP16, l'image entière les égale en
+  médiane (5,92 contre 6,02) et les bat en moyenne (6,53 contre 6,64) et au
+  p90 (8,28 contre 8,79). Au §6.32, les tranches gagnaient encore 0,57 ms.
+  - L'image entière arrive aussi 0,2-0,3 ms plus tôt, avec les mêmes octets
+    (2,98-3,04 contre 3,21-3,33 ms).
+  - Hypothèse, non vérifiée : par tranches, le fil principal soumet chaque
+    morceau pendant que l'image arrive, et il relève les messages suivants
+    plus tard.
+- **Le clic suit, en plus petit.** L'image entière en FP16 est le meilleur bras
+  PyroWave : 15,4 ms en moyenne et 20,3 au p90, contre 15,8 et 22,0 en f32.
+- **L'arrivée a été plus rapide qu'au §6.32** en image entière : 3,0 ms contre
+  3,4. Il ne faut comparer les bras qu'à l'intérieur d'une même série.
+
+**Verdict.** Le FP16 reste le défaut, et l'image entière, qui est le défaut du
+lecteur, en profite pleinement. Du relais au dessin, PyroWave reste à ~4,4 ms
+du HEVC du produit (5,92 contre 1,54 en médiane), et à 4,8 ms au clic moyen.
+Cet écart se compose de :
+- l'arrivée : +2,1 ms (2,98 contre 0,88) ;
+- la page après l'arrivée : +2,3 ms (2,95 contre 0,66). Sur ces 2,95 ms, le
+  GPU ne travaille que 1,25 ms.
+
+Les leviers suivants :
+- **l'iDWT sur AMD** : 0,73 ms sur la 780M, que le FP16 n'a pas touchées ;
+- **la page après l'arrivée** : B2.1, jugé en bout de chaîne. La soumission →
+  fin prend 2,3 ms pour 1,25 ms de GPU ;
+- **le surcoût des morceaux** passe après : les tranches ne gagnent plus rien,
+  tant que Chrome tarde à leur apporter les morceaux ;
+- **l'arrivée** : 177 Ko par image. Des images plus petites sont une décision
+  de Bruno.
+
 ## 7. Concrètement, pour l'utilisateur
 
 Pendant le POC, rien ne change : Ultra est caché derrière deux clés de banc et
